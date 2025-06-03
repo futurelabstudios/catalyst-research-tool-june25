@@ -59,7 +59,7 @@ export function ActivityTimeline({
   }, [isLoading, processedEvents]);
 
   return (
-    <Card className="border-none rounded-lg bg-neutral-700 max-h-96">
+    <Card className="border-none rounded-lg bg-neutral-700 max-h-fit">
       <CardHeader>
         <CardDescription className="flex items-center justify-between">
           <div
@@ -76,7 +76,7 @@ export function ActivityTimeline({
         </CardDescription>
       </CardHeader>
       {!isTimelineCollapsed && (
-        <ScrollArea className="max-h-96 overflow-y-auto">
+        <ScrollArea className="max-h-96 overflow-y-auto" hideScrollbar={true}>
           <CardContent>
             {isLoading && processedEvents.length === 0 && (
               <div className="relative pl-8 pb-4">
