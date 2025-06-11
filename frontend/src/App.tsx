@@ -44,7 +44,7 @@ export default function App() {
         const numSources = sources.length;
         // Determine if web search was used based on existence of sources
         const wasWebSearchUsed = numSources > 0;
-        let researchType = wasWebSearchUsed ? "Web Search" : "Internal KB";
+        const researchType = wasWebSearchUsed ? "Web Search" : "Internal KB";
         let dataMessage = wasWebSearchUsed
           ? `Gathered ${numSources} sources.`
           : "Searching internal knowledge base.";
