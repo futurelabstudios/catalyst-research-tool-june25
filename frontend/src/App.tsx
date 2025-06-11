@@ -1,3 +1,4 @@
+// frontend/src/App.tsx
 import { useStream } from "@langchain/langgraph-sdk/react";
 import type { Message } from "@langchain/langgraph-sdk";
 import { useState, useEffect, useRef, useCallback } from "react";
@@ -20,6 +21,7 @@ export default function App() {
     initial_search_query_count: number;
     max_research_loops: number;
     reasoning_model: string;
+    use_web_search: boolean; // NEW: Added to thread state type
   }>({
     apiUrl: import.meta.env.DEV
       ? "http://localhost:2024"
@@ -36,25 +38,36 @@ export default function App() {
           title: "Generating Search Queries",
           data: event.generate_query.query_list.join(", "),
         };
-      } else if (event.web_research) {
-        const sources = event.web_research.sources_gathered || [];
+      } else if (event.research_step) {
+        // CHANGED: from web_research
+        const sources = event.research_step.sources_gathered || [];
         const numSources = sources.length;
-        const uniqueLabels = [
-          ...new Set(sources.map((s: any) => s.label).filter(Boolean)),
-        ];
-        const exampleLabels = uniqueLabels.slice(0, 3).join(", ");
+        // Determine if web search was used based on existence of sources
+        const wasWebSearchUsed = numSources > 0;
+        let researchType = wasWebSearchUsed ? "Web Search" : "Internal KB";
+        let dataMessage = wasWebSearchUsed
+          ? `Gathered ${numSources} sources.`
+          : "Searching internal knowledge base.";
+
+        if (wasWebSearchUsed) {
+          const uniqueLabels = [
+            ...new Set(sources.map((s: any) => s.label).filter(Boolean)),
+          ];
+          const exampleLabels = uniqueLabels.slice(0, 3).join(", ");
+          if (exampleLabels) {
+            dataMessage += ` Related to: ${exampleLabels}.`;
+          }
+        }
         processedEvent = {
-          title: "Web Research",
-          data: `Gathered ${numSources} sources. Related to: ${
-            exampleLabels || "N/A"
-          }.`,
+          title: researchType + " Research", // Dynamic title based on tool
+          data: dataMessage,
         };
       } else if (event.reflection) {
         processedEvent = {
           title: "Reflection",
           data: event.reflection.is_sufficient
-            ? "Search successful, generating final answer."
-            : `Need more information, searching for ${event.reflection.follow_up_queries.join(
+            ? "Research sufficient, generating final answer."
+            : `Need more information, generating follow-up queries: ${event.reflection.follow_up_queries.join(
                 ", "
               )}`,
         };
@@ -103,15 +116,17 @@ export default function App() {
   }, [thread.messages, thread.isLoading, processedEventsTimeline]);
 
   const handleSubmit = useCallback(
-    (submittedInputValue: string, effort: string, model: string) => {
+    (
+      submittedInputValue: string,
+      effort: string,
+      model: string,
+      useWebSearch: boolean
+    ) => {
+      // NEW: Added useWebSearch
       if (!submittedInputValue.trim()) return;
       setProcessedEventsTimeline([]);
       hasFinalizeEventOccurredRef.current = false;
 
-      // convert effort to, initial_search_query_count and max_research_loops
-      // low means max 1 loop and 1 query
-      // medium means max 3 loops and 3 queries
-      // high means max 10 loops and 5 queries
       let initial_search_query_count = 0;
       let max_research_loops = 0;
       switch (effort) {
@@ -142,6 +157,7 @@ export default function App() {
         initial_search_query_count: initial_search_query_count,
         max_research_loops: max_research_loops,
         reasoning_model: model,
+        use_web_search: useWebSearch, // NEW: Pass the new parameter to the backend
       });
     },
     [thread]

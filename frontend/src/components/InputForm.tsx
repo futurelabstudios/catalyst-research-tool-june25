@@ -1,6 +1,15 @@
+// frontend/src/components/InputForm.tsx
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { SquarePen, Brain, Send, StopCircle, Zap, Cpu } from "lucide-react";
+import {
+  SquarePen,
+  Brain,
+  Send,
+  StopCircle,
+  Zap,
+  Cpu,
+  Globe,
+} from "lucide-react"; // Added Globe icon
 import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
@@ -12,7 +21,12 @@ import {
 
 // Updated InputFormProps
 interface InputFormProps {
-  onSubmit: (inputValue: string, effort: string, model: string) => void;
+  onSubmit: (
+    inputValue: string,
+    effort: string,
+    model: string,
+    useWebSearch: boolean // New parameter
+  ) => void;
   onCancel: () => void;
   isLoading: boolean;
   hasHistory: boolean;
@@ -27,11 +41,12 @@ export const InputForm: React.FC<InputFormProps> = ({
   const [internalInputValue, setInternalInputValue] = useState("");
   const [effort, setEffort] = useState("medium");
   const [model, setModel] = useState("gemini-2.5-flash-preview-04-17");
+  const [useWebSearch, setUseWebSearch] = useState(false); // NEW: State for web search toggle, default to false (internal KB)
 
   const handleInternalSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!internalInputValue.trim()) return;
-    onSubmit(internalInputValue, effort, model);
+    onSubmit(internalInputValue, effort, model, useWebSearch); // Pass useWebSearch
     setInternalInputValue("");
   };
 
@@ -61,11 +76,13 @@ export const InputForm: React.FC<InputFormProps> = ({
           onChange={(e) => setInternalInputValue(e.target.value)}
           onKeyDown={handleInternalKeyDown}
           placeholder="Who won the Euro 2024 and scored the most goals?"
-          className={`w-full text-neutral-100 placeholder-neutral-500 resize-none border-0 focus:outline-none focus:ring-0 outline-none focus-visible:ring-0 shadow-none 
+          className={`w-full text-neutral-100 placeholder-neutral-500 resize-none border-0 focus:outline-none focus:ring-0 outline-none focus-visible:ring-0 shadow-none
                         md:text-base  min-h-[56px] max-h-[200px]`}
           rows={1}
         />
-        <div className="-mt-3">
+        <div className="flex-shrink-0 -mt-3">
+          {" "}
+          {/* Added flex-shrink-0 */}
           {isLoading ? (
             <Button
               type="button"
@@ -94,7 +111,9 @@ export const InputForm: React.FC<InputFormProps> = ({
         </div>
       </div>
       <div className="flex items-center justify-between">
-        <div className="flex flex-row gap-2">
+        <div className="flex flex-row gap-2 flex-wrap">
+          {" "}
+          {/* Added flex-wrap for responsiveness */}
           <div className="flex flex-row gap-2 bg-neutral-700 border-neutral-600 text-neutral-300 focus:ring-neutral-500 rounded-xl rounded-t-sm pl-2  max-w-[100%] sm:max-w-[90%]">
             <div className="flex flex-row items-center text-sm">
               <Brain className="h-4 w-4 mr-2" />
@@ -126,6 +145,36 @@ export const InputForm: React.FC<InputFormProps> = ({
               </SelectContent>
             </Select>
           </div>
+          {/* NEW: Tools Dropdown */}
+          <div className="flex flex-row gap-2 bg-neutral-700 border-neutral-600 text-neutral-300 focus:ring-neutral-500 rounded-xl rounded-t-sm pl-2 max-w-[100%] sm:max-w-[90%]">
+            <div className="flex flex-row items-center text-sm ml-2">
+              <Globe className="h-4 w-4 mr-2" />
+              Tools
+            </div>
+            <Select
+              value={useWebSearch ? "web_search" : "internal_kb"}
+              onValueChange={(value) => setUseWebSearch(value === "web_search")}
+            >
+              <SelectTrigger className="w-[180px] bg-transparent border-none cursor-pointer">
+                <SelectValue placeholder="Select Tool" />
+              </SelectTrigger>
+              <SelectContent className="bg-neutral-700 border-neutral-600 text-neutral-300 cursor-pointer">
+                <SelectItem
+                  value="internal_kb"
+                  className="hover:bg-neutral-600 focus:bg-neutral-600 cursor-pointer"
+                >
+                  Internal KB (Default)
+                </SelectItem>
+                <SelectItem
+                  value="web_search"
+                  className="hover:bg-neutral-600 focus:bg-neutral-600 cursor-pointer"
+                >
+                  Web Search
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          {/* End NEW: Tools Dropdown */}
           <div className="flex flex-row gap-2 bg-neutral-700 border-neutral-600 text-neutral-300 focus:ring-neutral-500 rounded-xl rounded-t-sm pl-2  max-w-[100%] sm:max-w-[90%]">
             <div className="flex flex-row items-center text-sm ml-2">
               <Cpu className="h-4 w-4 mr-2" />

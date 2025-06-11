@@ -39,6 +39,11 @@ class Configuration(BaseModel):
         metadata={"description": "The maximum number of research loops to perform."},
     )
 
+    use_web_search: bool = Field(
+        default=False,
+        metadata={"description": "Whether to enable web search (True) or use the internal knowledge base (False) by default."},
+    )
+
     @classmethod
     def from_runnable_config(
         cls, config: Optional[RunnableConfig] = None
@@ -53,6 +58,10 @@ class Configuration(BaseModel):
             name: os.environ.get(name.upper(), configurable.get(name))
             for name in cls.model_fields.keys()
         }
+
+        # Explicitly handle boolean from configurable, as os.environ.get returns string
+        if "use_web_search" in configurable:
+            raw_values["use_web_search"] = bool(configurable["use_web_search"]) # Ensure boolean type
 
         # Filter out None values
         values = {k: v for k, v in raw_values.items() if v is not None}
