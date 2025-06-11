@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TypedDict
+from typing import TypedDict, Optional
 
 from langgraph.graph import add_messages
 from typing_extensions import Annotated
@@ -22,6 +22,7 @@ class OverallState(TypedDict):
     research_loop_count: int
     reasoning_model: str
     use_web_search: bool
+    chosen_kb_topic: Optional[str] # NEW: To store the chosen internal KB topic
 
 
 class ReflectionState(TypedDict):

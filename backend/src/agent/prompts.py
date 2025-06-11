@@ -30,10 +30,31 @@ Topic: What revenue grew more last year apple stock or the number of people buyi
     "query": ["Apple total revenue growth fiscal year 2024", "iPhone unit sales growth fiscal year 2024", "Apple stock price growth fiscal year 2024"],
 }}Context: {research_topic}"""
 
+# NEW PROMPT for Internal KB Routing
+kb_router_instructions = """You are an intelligent router responsible for directing user queries to the most relevant internal knowledge base topic.
+You will be given a user's query and a list of available knowledge base topics.
+Your task is to select *one single* topic that is most likely to contain the information needed to answer the user's query.
+
+Instructions:
+- Analyze the user's query carefully.
+- Choose the single most relevant topic from the `available_kb_topics` list.
+- If no topic seems directly relevant, choose the topic that is broadly closest, or a general topic if one exists (e.g., 'general_info').
+- Only output the topic name as it appears in the `available_kb_topics` list. Do NOT invent new topics.
+
+Format:
+- Format your response as a JSON object with these exact keys:
+   - "topic": The chosen knowledge base topic (e.g., "gender", "education").
+   - "rationale": A brief explanation of why this topic was chosen.
+
+Available knowledge base topics: {available_kb_topics}
+User Query: {research_topic}
+"""
+
 research_instructions = """You are an expert research assistant. Conduct targeted research based on the provided topic and summarize the findings into a verifiable text artifact.
 Instructions:
 The current date is {current_date}.
 Consolidate key findings while meticulously tracking the source(s) for each specific piece of information (if applicable, e.g., for web search, internal file path).
+IF THE PROVIDED SUMMARIES ARE FROM THE INTERNAL KNOWLEDGE BASE: You have been provided with the *entire* content of a specific internal knowledge base file, formatted with '--- FILE PATH: <path> ---' delimiters. Your task is to identify and extract *only* the information highly relevant to the "Research Topic" from this full content.
 The output should be a well-written summary or report based on your research findings.
 Only include the information found in the research results, don't make up any information.
 Research Topic:
@@ -71,7 +92,17 @@ You are the final step of a multi-step research process, don't mention that you 
 You have access to all the information gathered from the previous steps.
 You have access to the user's question.
 Generate a high-quality answer to the user's question based on the provided summaries and the user's question.
-you MUST include all the citations from the summaries in the answer correctly.
+
+IF THE SUMMARIES ARE FROM THE INTERNAL KNOWLEDGE BASE: The provided summaries contain the entire content of a specific internal knowledge base file, formatted with '--- FILE PATH: <path> ---' delimiters.
+- Extract and synthesize only the information directly relevant to the user's question from this content.
+- When referencing information that clearly comes from a specific file, use markdown link format: `[Descriptive reference/filename](path/to/file.pdf)`.
+- Ensure the `path` in the markdown link uses `/` (forward slashes).
+- Example: If the source is `--- FILE PATH: docs/reports/my_report.pdf ---`, you could cite it as `[My Report](docs/reports/my_report.pdf)`.
+- You do not need to include traditional numerical web citations for internal KB content.
+
+FOR WEB SEARCH RESULTS:
+- you MUST include all the citations from the summaries in the answer correctly. These will already be provided to you in the format `[label](short_url)`. Do not alter this format.
+
 User Context:
 {research_topic}
 Summaries:
