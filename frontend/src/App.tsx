@@ -67,9 +67,11 @@ export default function App() {
           title: "Reflection",
           data: event.reflection.is_sufficient
             ? "Research sufficient, generating final answer."
-            : `Need more information, generating follow-up queries: ${event.reflection.follow_up_queries.join(
-                ", "
-              )}`,
+            : `Need more information, generating follow-up queries: ${
+                Array.isArray(event.reflection.follow_up_queries)
+                  ? event.reflection.follow_up_queries.join(", ")
+                  : "No follow-up queries provided."
+              }`,
         };
       } else if (event.finalize_answer) {
         processedEvent = {
