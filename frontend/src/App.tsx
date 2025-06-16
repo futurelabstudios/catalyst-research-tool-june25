@@ -44,7 +44,7 @@ export default function App() {
         const numSources = sources.length;
         // Determine if web search was used based on existence of sources
         const wasWebSearchUsed = numSources > 0;
-        const researchType = wasWebSearchUsed ? "Web Search" : "Internal KB";
+        let researchType = wasWebSearchUsed ? "Web Search" : "Internal KB";
         let dataMessage = wasWebSearchUsed
           ? `Gathered ${numSources} sources.`
           : "Searching internal knowledge base.";
@@ -67,9 +67,11 @@ export default function App() {
           title: "Reflection",
           data: event.reflection.is_sufficient
             ? "Research sufficient, generating final answer."
-            : `Need more information, generating follow-up queries: ${event.reflection.follow_up_queries.join(
-                ", "
-              )}`,
+            : `Need more information, generating follow-up queries: ${
+                Array.isArray(event.reflection.follow_up_queries)
+                  ? event.reflection.follow_up_queries.join(", ")
+                  : "No follow-up queries provided."
+              }`,
         };
       } else if (event.finalize_answer) {
         processedEvent = {
@@ -195,6 +197,6 @@ export default function App() {
           )}
         </div>
       </main>
-    </div>
-  );
+    </div>
+  );
 }
