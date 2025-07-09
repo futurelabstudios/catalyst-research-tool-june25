@@ -1,13 +1,15 @@
 import os
-from typing import List
+from typing import List, AsyncGenerator
+import asyncio
 
-from agent.tools_and_schemas import SearchQueryList, Reflection, ChosenKBTopic # NEW: Import ChosenKBTopic
+
+from agent.tools_and_schemas import SearchQueryList, Reflection, ChosenKBTopic
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage
 from langgraph.types import Send
 from langgraph.graph import StateGraph
 from langgraph.graph import START, END
-from langchain_core.runnables import RunnableConfig
+from langchain_core.runnables import RunnableConfig, RunnableParallel
 from google.genai import Client
 from langchain_core.tools import tool
 
@@ -15,7 +17,7 @@ from agent.state import (
     OverallState,
     QueryGenerationState,
     ReflectionState,
-    WebSearchState, # Keep WebSearchState for consistency in data flow for research_step
+    WebSearchState,
 )
 from agent.configuration import Configuration
 from agent.prompts import (
@@ -24,7 +26,7 @@ from agent.prompts import (
     research_instructions,
     reflection_instructions,
     answer_instructions,
-    kb_router_instructions, # NEW: Import KB router prompt
+    kb_router_instructions,
 )
 from langchain_google_genai import ChatGoogleGenerativeAI
 from agent.utils import (
@@ -48,9 +50,8 @@ genai_client = Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 # Wrap the Google Search logic into a LangChain tool for consistency and easier use
 @tool
-def google_search_tool(query: str) -> dict:
-    """Performs a Google search and returns a summarized result with citations.
-    Returns a dictionary with 'content' and 'sources'."""
+async def google_search_tool(query: str) -> dict:
+    """Performs a Google search and returns a summarized result with citations."""
     configurable = Configuration.from_runnable_config(None) # Dummy config to get model name
     
     llm_for_search = ChatGoogleGenerativeAI(
@@ -65,13 +66,11 @@ def google_search_tool(query: str) -> dict:
         research_topic=query,
     )
 
-    response = genai_client.models.generate_content(
+    response = await asyncio.to_thread(
+        genai_client.models.generate_content,
         model=llm_for_search.model_name,
         contents=formatted_prompt,
-        config={
-            "tools": [{"google_search": {}}],
-            "temperature": 0,
-        },
+        config={"tools": [{"google_search": {}}], "temperature": 0},
     )
 
     sources_gathered = []
@@ -84,7 +83,7 @@ def google_search_tool(query: str) -> dict:
         modified_text = insert_citation_markers(response.text, citations)
         sources_gathered = [item for citation in citations for item in citation["segments"]]
     
-    return {"content": modified_text, "sources": sources_gathered}
+    return {"content": modified_text, "sources": sources_gathered, "input_query": query}
 
 
 # Nodes
@@ -149,70 +148,98 @@ def determine_tool_and_initial_action(state: OverallState, config: RunnableConfi
             }
 
 
-def research_step(state: OverallState, config: RunnableConfig) -> OverallState:
-    """LangGraph node that performs research using either internal KB or web search."""
+async def research_step(state: OverallState, config: RunnableConfig) -> AsyncGenerator[OverallState, None]:
+    """LangGraph node that performs research and STREAMS progress updates."""
     configurable = Configuration.from_runnable_config(config)
+    use_web_search = state.get("use_web_search", configurable.use_web_search)
 
-    result_content = ""
-    result_sources = []
-    
     # Initialize counts for the current research loop if they don't exist
     if state.get("initial_search_query_count") is None:
         state["initial_search_query_count"] = configurable.number_of_initial_queries
     if state.get("max_research_loops") is None:
         state["max_research_loops"] = configurable.max_research_loops
     
-    # Determine the number of queries to run in this loop
     current_loop_queries: List[str] = []
-    if configurable.use_web_search:
-        # For web search, queries come from query_list (generated in determine_tool_and_initial_action or reflection)
+    if use_web_search:
         current_loop_queries = state.get("query_list", [])
-        if not current_loop_queries: # If query_list is empty, use a single generic query for initial search
-             current_loop_queries = [get_research_topic(state["messages"])] # Fallback if no specific queries generated
+        if not current_loop_queries:
+            current_loop_queries = [get_research_topic(state["messages"])]
     else:
-        # For internal KB, the "query" is actually the chosen topic from the previous step
-        # There's only one "query" (topic) per KB lookup in this flow
         if state.get("chosen_kb_topic"):
             current_loop_queries = [state["chosen_kb_topic"]]
         else:
-            print("ERROR: Internal KB path active but no chosen_kb_topic in state.")
-            result_content = "Internal KB path active but no topic was selected or available."
-            # Set a dummy search_query for state consistency, even if it's an error.
-            return {
-                "sources_gathered": result_sources,
-                "search_query": ["error_no_topic"],
-                "web_research_result": [result_content],
+            # Handle error case
+            yield {
+                "web_research_result": ["Internal KB path active but no topic was selected."],
                 "research_loop_count": state.get("research_loop_count", 0) + 1,
-                "number_of_ran_queries": len(state.get("search_query", [])),
             }
-            
-    # Process each query/topic in the current loop (even if it's just one for KB)
+            return
+
+    ran_queries = state.get("search_query", [])
+    
+    # Initialize lists to store results
     gathered_contents = []
     gathered_sources = []
-    ran_queries = state.get("search_query", []) # Keep track of all queries run
-    
-    for query_or_topic in current_loop_queries:
-        if configurable.use_web_search:
-            print(f"DEBUG: Performing Web Search for query: '{query_or_topic}'")
-            tool_output = google_search_tool.invoke({"query": query_or_topic})
-            gathered_contents.append(tool_output["content"])
-            gathered_sources.extend(tool_output["sources"])
-        else:
-            print(f"DEBUG: Retrieving content from Internal Knowledge Base for topic: '{query_or_topic}'")
-            # Pass topic_name as the first argument, and config in kwargs
-            kb_content = internal_kb_tool_instance.invoke(query_or_topic, config=config)
-            gathered_contents.append(kb_content)
-            # Internal KB tool does not provide structured web citations, so sources_gathered remains empty
-            
-        ran_queries.append(query_or_topic) # Add to list of all queries run
 
-    return {
-        "sources_gathered": gathered_sources, # Will be empty for internal KB
-        "search_query": ran_queries, # Stores all queries/topics ever run
-        "web_research_result": gathered_contents, # Stores all collected contents
+    # Yield a "planning" message before starting
+    yield {
+        "messages": [
+            AIMessage(
+                content=f"Starting research with {len(current_loop_queries)} queries.",
+                name="tool_code",
+                tool_call_id="research_update",
+            )
+        ]
+    }
+
+    if use_web_search:
+        # Use RunnableParallel to execute all google searches concurrently
+        # Note: We need to make google_search_tool async
+        print(f"DEBUG: Performing {len(current_loop_queries)} Web Searches in parallel...")
+        parallel_searches = google_search_tool.batch_as_completed(
+            [{"query": q} for q in current_loop_queries], 
+            config=config
+        )
+        
+        for search_task in parallel_searches:
+            try:
+                # As each search completes, yield an update
+                tool_output = await search_task
+                query_used = tool_output['input_query'] # We'll modify the tool to return this
+                
+                yield {
+                    "messages": [
+                        AIMessage(
+                            content=f"Finished search for: '{query_used}'. Found {len(tool_output['sources'])} sources.",
+                            name="tool_code",
+                            tool_call_id="research_update",
+                        )
+                    ]
+                }
+                gathered_contents.append(tool_output["content"])
+                gathered_sources.extend(tool_output["sources"])
+                ran_queries.append(query_used)
+            except Exception as e:
+                yield {"messages": [AIMessage(content=f"Search failed for a query. Error: {e}", name="tool_code", tool_call_id="research_update")]}
+    
+    else: # Internal KB path (already sequential, but we can stream progress)
+        for topic in current_loop_queries:
+            yield {"messages": [AIMessage(content=f"Retrieving from Internal KB: '{topic}'", name="tool_code", tool_call_id="research_update")]}
+            await asyncio.sleep(0.5) # Simulate work and allow message to show
+            kb_content = await internal_kb_tool_instance.ainvoke(topic, config=config)
+            gathered_contents.append(kb_content)
+            ran_queries.append(topic)
+            yield {"messages": [AIMessage(content=f"Finished retrieving from Internal KB: '{topic}'", name="tool_code", tool_call_id="research_update")]}
+
+    # Yield the final accumulated state for this node
+    yield {
+        "sources_gathered": gathered_sources,
+        "search_query": ran_queries,
+        "web_research_result": gathered_contents,
         "research_loop_count": state.get("research_loop_count", 0) + 1,
         "number_of_ran_queries": len(ran_queries),
     }
+
 
 
 def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:

@@ -1,3 +1,4 @@
+import asyncio
 import os
 import xml.etree.ElementTree as ET
 from typing import Dict, Any, List, Optional
@@ -56,6 +57,9 @@ class InternalKnowledgeBaseTool(BaseTool):
         
         topics = sorted(self._available_kb_files.keys())
         return "Available knowledge base topics: " + ", ".join(topics) + "."
+    
+    async def _arun(self, topic_name: str, config: Optional[RunnableConfig] = None) -> str:
+        return await asyncio.to_thread(self._run, topic_name, config)
 
     def _run(self, topic_name: str, config: Optional[RunnableConfig] = None) -> str:
         """
