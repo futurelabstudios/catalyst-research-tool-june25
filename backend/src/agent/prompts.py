@@ -107,3 +107,48 @@ User Context:
 {research_topic}
 Summaries:
 {summaries}"""
+
+
+kb_file_selector_instructions = """You are an intelligent file selector for an internal knowledge base. 
+You will be given a user's query and an index of available files with summaries.
+Your task is to select the most relevant file_id(s) that are likely to contain information needed to answer the user's query.
+
+Instructions:
+- Analyze the user's query and the file summaries carefully
+- Select 1-3 file_ids that are most relevant to the query
+- Focus on files that directly address the user's question
+- Consider keywords, content type, and file descriptions
+
+Format your response as a JSON object with these exact keys:
+- "selected_file_ids": List of chosen file_ids (e.g., ["file123", "file456"])
+- "rationale": Brief explanation of why these files were chosen
+
+Available Files Index:
+{files_index}
+
+User Query: {user_query}
+"""
+
+kb_reflection_instructions = """You are an expert research assistant analyzing content from internal knowledge base files about "{user_query}".
+
+Instructions:
+- Identify knowledge gaps or areas that need deeper exploration
+- If the provided content is sufficient to answer the user's question, indicate so
+- If there are knowledge gaps, suggest specific file_id(s) from the available index that might fill those gaps
+- Focus on missing technical details, implementation specifics, or related information
+
+Requirements:
+- Only suggest file_ids that exist in the provided index
+- Ensure suggested files are likely to contain complementary information
+
+Format your response as a JSON object with these exact keys:
+- "is_sufficient": true or false
+- "knowledge_gap": Describe what information is missing (empty string if sufficient)
+- "suggested_file_ids": List of file_ids that might address the gaps (empty list if sufficient)
+
+Available Files Index:
+{files_index}
+
+Current Content Analysis:
+{summaries}
+"""

@@ -22,7 +22,9 @@ class OverallState(TypedDict):
     research_loop_count: int
     reasoning_model: str
     use_web_search: bool
-    chosen_kb_topic: Optional[str] # NEW: To store the chosen internal KB topic
+    chosen_kb_topic: Optional[str]
+    fetched_file_ids: Annotated[list, operator.add]
+    is_research_complete: Optional[bool] = None
 
 
 class ReflectionState(TypedDict):
