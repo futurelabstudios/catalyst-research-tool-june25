@@ -22,10 +22,22 @@ class Reflection(BaseModel):
         description="A list of follow-up queries to address the knowledge gap."
     )
 
-class ChosenKBTopic(BaseModel):
-    topic: str = Field(
-        description="The chosen internal knowledge base topic that is most relevant to the user's query."
+
+class FileSelection(BaseModel):
+    selected_file_ids: List[str] = Field(
+        description="A list of file IDs that are most relevant to the user's query."
     )
     rationale: str = Field(
-        description="A brief explanation of why this topic was chosen."
+        description="A brief explanation of why these files were chosen."
+    )
+
+class KBReflection(BaseModel):
+    is_sufficient: bool = Field(
+        description="Whether the provided content from knowledge base files is sufficient to answer the user's question."
+    )
+    knowledge_gap: str = Field(
+        description="A description of what information is missing or needs clarification."
+    )
+    suggested_file_ids: List[str] = Field(
+        description="A list of file IDs that might address the identified knowledge gaps."
     )

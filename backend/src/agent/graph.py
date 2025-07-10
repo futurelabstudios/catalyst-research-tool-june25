@@ -3,7 +3,7 @@ from typing import List, AsyncGenerator
 import asyncio
 
 
-from agent.tools_and_schemas import SearchQueryList, Reflection, ChosenKBTopic
+from agent.tools_and_schemas import SearchQueryList, Reflection, FileSelection, KBReflection
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage
 from langgraph.types import Send
@@ -26,7 +26,8 @@ from agent.prompts import (
     research_instructions,
     reflection_instructions,
     answer_instructions,
-    kb_router_instructions,
+    kb_file_selector_instructions,
+    kb_reflection_instructions,
 )
 from langchain_google_genai import ChatGoogleGenerativeAI
 from agent.utils import (
@@ -42,8 +43,11 @@ load_dotenv()
 if os.getenv("GEMINI_API_KEY") is None:
     raise ValueError("GEMINI_API_KEY is not set")
 
-# Initialize the Internal Knowledge Base Tool (now scans directory)
-internal_kb_tool_instance = InternalKnowledgeBaseTool()
+# Initialize the Internal Knowledge Base Tool
+internal_kb_tool_instance = InternalKnowledgeBaseTool(xml_file_path=os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "../../public/cg_extracted.xml"
+))
 
 # Used for Google Search API
 genai_client = Client(api_key=os.getenv("GEMINI_API_KEY"))
@@ -113,38 +117,45 @@ def determine_tool_and_initial_action(state: OverallState, config: RunnableConfi
         )
         
         result = structured_llm.invoke(formatted_prompt)
-        return {"query_list": result.query, "use_web_search": True}
+        return {
+            "query_list": result.query, 
+            "use_web_search": True,
+            "research_loop_count": 0  # Initialize here
+        }
     else:
-        print("DEBUG: Using Internal Knowledge Base path. Routing to KB topic selection.")
+        print("DEBUG: Using Internal Knowledge Base path. Selecting relevant files from index.")
         llm = ChatGoogleGenerativeAI(
-            model=configurable.query_generator_model, # Using query_generator_model for routing as well
-            temperature=0.0, # Keep temperature low for routing
+            model=configurable.query_generator_model,
+            temperature=0.0,
             max_retries=2,
             api_key=os.getenv("GEMINI_API_KEY"),
         )
-        structured_llm = llm.with_structured_output(ChosenKBTopic)
+        structured_llm = llm.with_structured_output(FileSelection)
 
-        available_topics_str = internal_kb_tool_instance.get_available_topics_for_llm()
-        formatted_prompt = kb_router_instructions.format(
-            available_kb_topics=available_topics_str,
-            research_topic=user_query,
+        files_index = internal_kb_tool_instance.get_index_for_llm()
+        formatted_prompt = kb_file_selector_instructions.format(
+            files_index=files_index,
+            user_query=user_query,
         )
         
         try:
-            chosen_topic_result = structured_llm.invoke(formatted_prompt)
-            chosen_topic = chosen_topic_result.topic
-            print(f"DEBUG: LLM chose internal KB topic: '{chosen_topic}'")
-            # We will use 'search_query' field to store the chosen KB topic for research_step to consume
-            # This allows research_step to keep a consistent input state type.
-            return {"search_query": [chosen_topic], "use_web_search": False, "chosen_kb_topic": chosen_topic}
-        except Exception as e:
-            print(f"ERROR: Failed to route internal KB query: {e}. Returning an error message.")
-            # Fallback if LLM fails to choose a topic
+            file_selection_result = structured_llm.invoke(formatted_prompt)
+            selected_file_ids = file_selection_result.selected_file_ids
+            print(f"DEBUG: LLM selected file IDs: {selected_file_ids}")
             return {
-                "web_research_result": [f"I could not determine a relevant internal knowledge base topic for your query. Error: {e}. Available topics: {available_topics_str}"],
-                "messages": [AIMessage(content=f"I could not determine a relevant internal knowledge base topic for your query. Error: {e}. Available topics: {available_topics_str}")],
-                "use_web_search": False, # Still indicate internal KB was attempted
-                "chosen_kb_topic": "error_fallback"
+                "search_query": selected_file_ids, 
+                "use_web_search": False, 
+                "fetched_file_ids": selected_file_ids,
+                "research_loop_count": 0  # Initialize here
+            }
+        except Exception as e:
+            print(f"ERROR: Failed to select files from KB index: {e}")
+            return {
+                "web_research_result": [f"I could not select relevant files from the knowledge base. Error: {e}"],
+                "messages": [AIMessage(content=f"I could not select relevant files from the knowledge base. Error: {e}")],
+                "use_web_search": False,
+                "fetched_file_ids": [],
+                "research_loop_count": 0  # Initialize here
             }
 
 
@@ -171,7 +182,7 @@ async def research_step(state: OverallState, config: RunnableConfig) -> AsyncGen
             # Handle error case
             yield {
                 "web_research_result": ["Internal KB path active but no topic was selected."],
-                "research_loop_count": state.get("research_loop_count", 0) + 1,
+                # Don't update research_loop_count here to avoid conflicts
             }
             return
 
@@ -222,21 +233,39 @@ async def research_step(state: OverallState, config: RunnableConfig) -> AsyncGen
             except Exception as e:
                 yield {"messages": [AIMessage(content=f"Search failed for a query. Error: {e}", name="tool_code", tool_call_id="research_update")]}
     
-    else: # Internal KB path (already sequential, but we can stream progress)
-        for topic in current_loop_queries:
-            yield {"messages": [AIMessage(content=f"Retrieving from Internal KB: '{topic}'", name="tool_code", tool_call_id="research_update")]}
-            await asyncio.sleep(0.5) # Simulate work and allow message to show
-            kb_content = await internal_kb_tool_instance.ainvoke(topic, config=config)
-            gathered_contents.append(kb_content)
-            ran_queries.append(topic)
-            yield {"messages": [AIMessage(content=f"Finished retrieving from Internal KB: '{topic}'", name="tool_code", tool_call_id="research_update")]}
+    else: # Internal KB path
+        for file_id in current_loop_queries:
+            yield {"messages": [AIMessage(content=f"Retrieving from Internal KB: file ID '{file_id}'", name="tool_code", tool_call_id="research_update")]}
+            await asyncio.sleep(0.5)
+            
+            # Add debug logging to see what's being retrieved
+            try:
+                kb_content = await internal_kb_tool_instance.ainvoke(file_id, config=config)
+                print(f"DEBUG: Retrieved content for file ID {file_id}: {kb_content[:200]}...")  # First 200 chars
+                
+                if not kb_content or kb_content.strip() == "":
+                    print(f"WARNING: Empty or no content retrieved for file ID {file_id}")
+                    kb_content = f"No content found for file ID: {file_id}"
+                
+                gathered_contents.append(kb_content)
+                ran_queries.append(file_id)
+                yield {"messages": [AIMessage(content=f"Finished retrieving file ID: '{file_id}' (Content length: {len(kb_content)} chars)", name="tool_code", tool_call_id="research_update")]}
+                
+            except Exception as e:
+                print(f"ERROR: Failed to retrieve content for file ID {file_id}: {e}")
+                error_content = f"Error retrieving file ID {file_id}: {e}"
+                gathered_contents.append(error_content)
+                ran_queries.append(file_id)
+                yield {"messages": [AIMessage(content=f"Error retrieving file ID: '{file_id}' - {e}", name="tool_code", tool_call_id="research_update")]}
 
     # Yield the final accumulated state for this node
+    # Only increment research_loop_count in the final yield to avoid conflicts
+    current_research_count = state.get("research_loop_count", 0)
     yield {
         "sources_gathered": gathered_sources,
         "search_query": ran_queries,
         "web_research_result": gathered_contents,
-        "research_loop_count": state.get("research_loop_count", 0) + 1,
+        "research_loop_count": current_research_count + 1,  # Only update once at the end
         "number_of_ran_queries": len(ran_queries),
     }
 
@@ -245,36 +274,65 @@ async def research_step(state: OverallState, config: RunnableConfig) -> AsyncGen
 def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     """LangGraph node that identifies knowledge gaps and generates potential follow-up queries."""
     configurable = Configuration.from_runnable_config(config)
-    reasoning_model = configurable.reflection_model # Use model from config
+    reasoning_model = configurable.reflection_model
+    use_web_search = state.get("use_web_search", configurable.use_web_search)
 
     current_date = get_current_date()
-    formatted_prompt = reflection_instructions.format(
-        current_date=current_date,
-        research_topic=get_research_topic(state["messages"]),
-        summaries="\n\n---\n\n".join(state["web_research_result"]),
-    )
+    research_topic = get_research_topic(state["messages"])
     
-    llm = ChatGoogleGenerativeAI(
-        model=reasoning_model,
-        temperature=1.0,
-        max_retries=2,
-        api_key=os.getenv("GEMINI_API_KEY"),
-    )
-    result = llm.with_structured_output(Reflection).invoke(formatted_prompt)
-
-    return {
-        "is_sufficient": result.is_sufficient,
-        "knowledge_gap": result.knowledge_gap,
-        "follow_up_queries": result.follow_up_queries,
-        "research_loop_count": state["research_loop_count"],
-        "number_of_ran_queries": len(state["search_query"]),
-    }
+    if use_web_search:
+        # Use existing web search reflection
+        formatted_prompt = reflection_instructions.format(
+            current_date=current_date,
+            research_topic=research_topic,
+            summaries="\n\n---\n\n".join(state["web_research_result"]),
+        )
+        
+        llm = ChatGoogleGenerativeAI(
+            model=reasoning_model,
+            temperature=1.0,
+            max_retries=2,
+            api_key=os.getenv("GEMINI_API_KEY"),
+        )
+        result = llm.with_structured_output(Reflection).invoke(formatted_prompt)
+        
+        return {
+            "is_sufficient": result.is_sufficient,
+            "knowledge_gap": result.knowledge_gap,
+            "follow_up_queries": result.follow_up_queries,
+            "research_loop_count": state["research_loop_count"],
+            "number_of_ran_queries": len(state["search_query"]),
+        }
+    else:
+        # Use KB-specific reflection
+        files_index = internal_kb_tool_instance.get_index_for_llm()
+        formatted_prompt = kb_reflection_instructions.format(
+            user_query=research_topic,
+            files_index=files_index,
+            summaries="\n\n---\n\n".join(state["web_research_result"]),
+        )
+        
+        llm = ChatGoogleGenerativeAI(
+            model=reasoning_model,
+            temperature=1.0,
+            max_retries=2,
+            api_key=os.getenv("GEMINI_API_KEY"),
+        )
+        result = llm.with_structured_output(KBReflection).invoke(formatted_prompt)
+        
+        return {
+            "is_sufficient": result.is_sufficient,
+            "knowledge_gap": result.knowledge_gap,
+            "follow_up_queries": result.suggested_file_ids,  # Use file_ids as follow-up queries
+            "research_loop_count": state["research_loop_count"],
+            "number_of_ran_queries": len(state["search_query"]),
+        }
 
 
 def evaluate_research(
     state: ReflectionState,
     config: RunnableConfig,
-) -> str | List[Send]: # Return type changed for clarity
+) -> str:  # Changed return type - no more Send for parallel processing
     """LangGraph routing function that determines the next step in the research flow."""
     configurable = Configuration.from_runnable_config(config)
     max_research_loops = (
@@ -286,31 +344,55 @@ def evaluate_research(
     if state["is_sufficient"] or state["research_loop_count"] >= max_research_loops:
         return "finalize_answer"
     else:
-        # If not sufficient and not max loops, continue researching
-        if configurable.use_web_search:
-            # For web search, generate new queries
-            return [
-                Send(
-                    "research_step",
-                    {
-                        "query_list": state["follow_up_queries"], # Pass follow-up queries to research_step
-                        "id": state["number_of_ran_queries"] + int(idx),
-                    },
-                )
-                for idx, follow_up_query in enumerate(state["follow_up_queries"])
-            ]
-        else:
-            # For internal KB, we don't generate follow-up search queries.
-            # The reflection suggested a knowledge gap, but we already sent the whole relevant file.
-            # We should probably go directly to finalize_answer here for internal KB,
-            # as the current setup doesn't support iterative KB refinement from follow-up queries.
-            # Or, we could attempt to re-route to a *different* KB topic if the reflection implies
-            # a different area of the KB might be relevant. For now, let's finalize.
-            print("DEBUG: Internal KB: Reflection indicated knowledge gap, but current flow doesn't support iterative KB search. Finalizing answer.")
-            return "finalize_answer"
+        # Continue research but prepare queries for the next iteration
+        # Store follow-up queries in state to be processed sequentially
+        return "prepare_followup_research"
 
 
-def finalize_answer(state: OverallState, config: RunnableConfig):
+def prepare_followup_research(state: ReflectionState, config: RunnableConfig) -> OverallState:
+    """Prepare follow-up research queries without parallel processing to avoid state conflicts."""
+    configurable = Configuration.from_runnable_config(config)
+    
+    if configurable.use_web_search:
+        # For web search, set up follow-up queries
+        if not state["follow_up_queries"]:
+            # No follow-up queries, mark as sufficient to trigger finalization
+            return {"is_research_complete": True}
+        return {
+            "query_list": state["follow_up_queries"],
+            "use_web_search": True,
+            "is_research_complete": False,
+        }
+    else:
+        # For internal KB, filter out already fetched file IDs
+        fetched_ids = set(state.get("fetched_file_ids", []))
+        new_file_ids = [fid for fid in state["follow_up_queries"] if fid not in fetched_ids]
+        
+        if not new_file_ids:
+            print("DEBUG: Internal KB: No new file IDs to fetch. Finalizing answer.")
+            return {"is_research_complete": True}  # Signal completion
+        
+        # Update fetched_file_ids to include new ones
+        updated_fetched_ids = list(fetched_ids) + new_file_ids
+        
+        return {
+            "search_query": new_file_ids,
+            "chosen_kb_topic": None,  # Reset this
+            "fetched_file_ids": updated_fetched_ids,
+            "use_web_search": False,
+            "is_research_complete": False,
+        }
+
+
+def check_research_completion(state: OverallState) -> str:
+    """Check if research is complete or if we need to continue."""
+    if state.get("is_research_complete", False):
+        return "finalize_answer"
+    else:
+        return "research_step"
+
+
+def finalize_answer(state: OverallState, config: RunnableConfig) -> OverallState:
     """LangGraph node that finalizes the research summary."""
     configurable = Configuration.from_runnable_config(config)
     reasoning_model = configurable.answer_model # Use model from config
@@ -351,41 +433,40 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
     }
 
 
-# Update the OverallState definition in state.py
-# If you haven't done this already, update backend/src/agent/state.py
-# by adding 'chosen_kb_topic: Optional[str]' to OverallState.
-# (If you followed the previous step to add this, you can skip this comment block,
-# but it's crucial for the state to correctly propagate the chosen topic).
-
 # Create our Agent Graph
 builder = StateGraph(OverallState, config_schema=Configuration)
 
 # Define the nodes we will cycle between
-# NEW: Initial node to determine the path (web search vs. internal KB)
 builder.add_node("determine_tool_and_initial_action", determine_tool_and_initial_action)
 builder.add_node("research_step", research_step)
 builder.add_node("reflection", reflection)
+builder.add_node("prepare_followup_research", prepare_followup_research)
 builder.add_node("finalize_answer", finalize_answer)
 
-# Set the entrypoint as `determine_tool_and_initial_action`
+# Set the entrypoint
 builder.add_edge(START, "determine_tool_and_initial_action")
 
-# Conditional routing AFTER determine_tool_and_initial_action
-# If use_web_search is True, proceed to research_step immediately.
-# If use_web_search is False, research_step will internally handle KB topic.
+# Sequential flow to avoid parallel state conflicts
 builder.add_edge("determine_tool_and_initial_action", "research_step")
-
-
-# Reflect on the research (same for both paths)
 builder.add_edge("research_step", "reflection")
 
-# Evaluate the research and decide next step
+# Conditional routing after reflection
 builder.add_conditional_edges(
     "reflection",
     evaluate_research,
     {
-        "research_step": "research_step", # For web search, go back to research_step with follow-up queries
-        "finalize_answer": "finalize_answer" # For KB or if sufficient, finalize
+        "prepare_followup_research": "prepare_followup_research",
+        "finalize_answer": "finalize_answer"
+    }
+)
+
+# After preparing follow-up research, conditionally route based on completion
+builder.add_conditional_edges(
+    "prepare_followup_research",
+    check_research_completion,
+    {
+        "research_step": "research_step",
+        "finalize_answer": "finalize_answer"
     }
 )
 
