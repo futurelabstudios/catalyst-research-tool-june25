@@ -1,17 +1,14 @@
-// frontend/src/App.tsx
 import { useStream } from "@langchain/langgraph-sdk/react";
 import type { Message } from "@langchain/langgraph-sdk";
 import { useState, useEffect, useRef, useCallback } from "react";
-import { ProcessedEvent } from "@/components/ActivityTimeline";
 import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { ChatMessagesView } from "@/components/ChatMessagesView";
+import { Activity } from "./lib/activity-types";
 
 export default function App() {
-  const [processedEventsTimeline, setProcessedEventsTimeline] = useState<
-    ProcessedEvent[]
-  >([]);
+  const [currentActivities, setCurrentActivities] = useState<Activity[]>([]);
   const [historicalActivities, setHistoricalActivities] = useState<
-    Record<string, ProcessedEvent[]>
+    Record<string, Activity[]>
   >({});
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const hasFinalizeEventOccurredRef = useRef(false);
@@ -21,7 +18,8 @@ export default function App() {
     initial_search_query_count: number;
     max_research_loops: number;
     reasoning_model: string;
-    use_web_search: boolean; // NEW: Added to thread state type
+    use_web_search: boolean;
+    activity_feed?: Activity[]; // New: expecting structured activities from backend
   }>({
     apiUrl: import.meta.env.DEV
       ? "http://localhost:2024"
@@ -32,59 +30,123 @@ export default function App() {
       console.log(event);
     },
     onUpdateEvent: (event: any) => {
-      let processedEvent: ProcessedEvent | null = null;
-      if (event.generate_query) {
-        processedEvent = {
-          title: "Generating Search Queries",
-          data: event.generate_query.query_list.join(", "),
-        };
-      } else if (event.research_step) {
-        // CHANGED: from web_research
-        const sources = event.research_step.sources_gathered || [];
-        const numSources = sources.length;
-        // Determine if web search was used based on existence of sources
-        const wasWebSearchUsed = numSources > 0;
-        let researchType = wasWebSearchUsed ? "Web Search" : "Internal KB";
-        let dataMessage = wasWebSearchUsed
-          ? `Gathered ${numSources} sources.`
-          : "Searching internal knowledge base.";
+      if (event.activity_feed && Array.isArray(event.activity_feed)) {
+        const newActivities = event.activity_feed.map((activity: any) => ({
+          ...activity,
+          timestamp: activity.timestamp
+            ? new Date(activity.timestamp)
+            : new Date(),
+        }));
 
-        if (wasWebSearchUsed) {
-          const uniqueLabels = [
-            ...new Set(sources.map((s: any) => s.label).filter(Boolean)),
-          ];
-          const exampleLabels = uniqueLabels.slice(0, 3).join(", ");
-          if (exampleLabels) {
-            dataMessage += ` Related to: ${exampleLabels}.`;
-          }
-        }
-        processedEvent = {
-          title: researchType + " Research", // Dynamic title based on tool
-          data: dataMessage,
-        };
-      } else if (event.reflection) {
-        processedEvent = {
-          title: "Reflection",
-          data: event.reflection.is_sufficient
-            ? "Research sufficient, generating final answer."
-            : `Need more information, generating follow-up queries: ${
-                Array.isArray(event.reflection.follow_up_queries)
-                  ? event.reflection.follow_up_queries.join(", ")
-                  : "No follow-up queries provided."
-              }`,
-        };
-      } else if (event.finalize_answer) {
-        processedEvent = {
-          title: "Finalizing Answer",
-          data: "Composing and presenting the final answer.",
-        };
-        hasFinalizeEventOccurredRef.current = true;
+        setCurrentActivities((prevActivities) => {
+          // Merge new activities with existing ones
+          const activityMap = new Map(prevActivities.map((a) => [a.id, a]));
+
+          newActivities.forEach((newActivity: Activity) => {
+            if (activityMap.has(newActivity.id)) {
+              // Update existing activity
+              activityMap.set(newActivity.id, {
+                ...activityMap.get(newActivity.id)!,
+                ...newActivity,
+                timestamp: activityMap.get(newActivity.id)!.timestamp, // Keep original timestamp
+              });
+            } else {
+              // Add new activity
+              activityMap.set(newActivity.id, newActivity);
+            }
+          });
+
+          return Array.from(activityMap.values()).sort(
+            (a, b) => a.timestamp.getTime() - b.timestamp.getTime()
+          );
+        });
       }
-      if (processedEvent) {
-        setProcessedEventsTimeline((prevEvents) => [
-          ...prevEvents,
-          processedEvent!,
-        ]);
+      // FALLBACK: Handle legacy event format while backend is being updated
+      else {
+        let legacyActivity: Activity | null = null;
+        const timestamp = new Date();
+
+        if (event.generate_query) {
+          legacyActivity = {
+            id: `generate_query_${timestamp.getTime()}`,
+            phase: "Planning",
+            title: "Generating Search Queries",
+            details: event.generate_query.query_list.join(", "),
+            status: "completed",
+            timestamp,
+            icon: "search",
+            importance: "normal",
+          };
+        } else if (event.research_step) {
+          const sources = event.research_step.sources_gathered || [];
+          const numSources = sources.length;
+          const wasWebSearchUsed = numSources > 0;
+
+          const researchType = wasWebSearchUsed ? "Web Search" : "Internal KB";
+          let details = wasWebSearchUsed
+            ? `Gathered ${numSources} sources.`
+            : "Searching internal knowledge base.";
+
+          if (wasWebSearchUsed) {
+            const uniqueLabels = [
+              ...new Set(sources.map((s: any) => s.label).filter(Boolean)),
+            ];
+            const exampleLabels = uniqueLabels.slice(0, 3).join(", ");
+            if (exampleLabels) {
+              details += ` Related to: ${exampleLabels}.`;
+            }
+          }
+
+          legacyActivity = {
+            id: `research_${timestamp.getTime()}`,
+            phase: "Research",
+            title: `${researchType} Research`,
+            details,
+            status: "completed",
+            timestamp,
+            progress: wasWebSearchUsed
+              ? { current: numSources, total: numSources }
+              : undefined,
+            icon: wasWebSearchUsed ? "globe" : "database",
+            importance: "critical",
+          };
+        } else if (event.reflection) {
+          legacyActivity = {
+            id: `reflection_${timestamp.getTime()}`,
+            phase: "Analysis",
+            title: "Reflection",
+            details: event.reflection.is_sufficient
+              ? "Research sufficient, generating final answer."
+              : `Need more information, generating follow-up queries: ${
+                  Array.isArray(event.reflection.follow_up_queries)
+                    ? event.reflection.follow_up_queries.join(", ")
+                    : "No follow-up queries provided."
+                }`,
+            status: "completed",
+            timestamp,
+            icon: "brain",
+            importance: "normal",
+          };
+        } else if (event.finalize_answer) {
+          legacyActivity = {
+            id: `finalize_${timestamp.getTime()}`,
+            phase: "Synthesis",
+            title: "Finalizing Answer",
+            details: "Composing and presenting the final answer.",
+            status: "completed",
+            timestamp,
+            icon: "check-circle",
+            importance: "critical",
+          };
+          hasFinalizeEventOccurredRef.current = true;
+        }
+
+        if (legacyActivity) {
+          setCurrentActivities((prevActivities) => [
+            ...prevActivities,
+            legacyActivity!,
+          ]);
+        }
       }
     },
   });
@@ -110,12 +172,12 @@ export default function App() {
       if (lastMessage && lastMessage.type === "ai" && lastMessage.id) {
         setHistoricalActivities((prev) => ({
           ...prev,
-          [lastMessage.id!]: [...processedEventsTimeline],
+          [lastMessage.id!]: [...currentActivities],
         }));
       }
       hasFinalizeEventOccurredRef.current = false;
     }
-  }, [thread.messages, thread.isLoading, processedEventsTimeline]);
+  }, [thread.messages, thread.isLoading, currentActivities]);
 
   const handleSubmit = useCallback(
     (
@@ -124,9 +186,10 @@ export default function App() {
       model: string,
       useWebSearch: boolean
     ) => {
-      // NEW: Added useWebSearch
       if (!submittedInputValue.trim()) return;
-      setProcessedEventsTimeline([]);
+
+      // Clear current activities for new request
+      setCurrentActivities([]);
       hasFinalizeEventOccurredRef.current = false;
 
       let initial_search_query_count = 0;
@@ -154,12 +217,13 @@ export default function App() {
           id: Date.now().toString(),
         },
       ];
+
       thread.submit({
         messages: newMessages,
         initial_search_query_count: initial_search_query_count,
         max_research_loops: max_research_loops,
         reasoning_model: model,
-        use_web_search: useWebSearch, // NEW: Pass the new parameter to the backend
+        use_web_search: useWebSearch,
       });
     },
     [thread]
@@ -169,6 +233,19 @@ export default function App() {
     thread.stop();
     window.location.reload();
   }, [thread]);
+
+  // NEW: Retry function for failed activities
+  const handleRetryActivity = useCallback((activityId: string) => {
+    setCurrentActivities((prevActivities) =>
+      prevActivities.map((activity) =>
+        activity.id === activityId
+          ? { ...activity, status: "in_progress" as const }
+          : activity
+      )
+    );
+    // Here you would typically send a retry request to the backend
+    // For now, we'll just update the UI state
+  }, []);
 
   return (
     <div className="flex h-screen bg-neutral-800 text-neutral-100 font-sans antialiased">
@@ -191,12 +268,14 @@ export default function App() {
               scrollAreaRef={scrollAreaRef}
               onSubmit={handleSubmit}
               onCancel={handleCancel}
-              liveActivityEvents={processedEventsTimeline}
+              // NEW: Pass structured activities instead of simple events
+              liveActivities={currentActivities}
               historicalActivities={historicalActivities}
+              onRetryActivity={handleRetryActivity}
             />
           )}
         </div>
       </main>
-    </div>
-  );
+    </div>
+  );
 }

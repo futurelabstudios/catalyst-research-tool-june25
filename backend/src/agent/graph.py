@@ -4,6 +4,7 @@ import time
 from typing import List, Dict
 from functools import wraps
 
+from agent.activity import create_activity
 from agent.tools_and_schemas import SearchQueryList, Reflection, RelevantFileList
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage
@@ -132,6 +133,8 @@ except Exception as e:
     main_logger.error(f"Failed to initialize Google GenAI client: {str(e)}")
     raise
 
+
+
 @tool
 @log_execution_time
 def google_search_tool(query: str) -> dict:
@@ -259,6 +262,10 @@ def perform_web_search(state: OverallState, config: RunnableConfig) -> Dict:
     search_logger.info(f"Starting web search iteration {current_loop + 1}")
     search_logger.info(f"Performing web search for {len(queries)} queries: {queries}")
     
+    # Activity feed start
+    activity_start = create_activity(
+        "web_search", "Research", f"Performing web search (iteration {current_loop + 1})...", None, "in_progress", "search"
+    )
     try:
         gathered_contents = []
         gathered_sources = []
@@ -274,10 +281,17 @@ def perform_web_search(state: OverallState, config: RunnableConfig) -> Dict:
 
         search_logger.info(f"Web search completed. Total content items: {len(gathered_contents)}, Total sources: {len(gathered_sources)}")
         
+        # Activity feed end
+        activity_end = create_activity(
+            "web_search", "Research", f"Web search iteration {current_loop + 1} complete", 
+            f"Gathered {len(gathered_contents)} content items, {len(gathered_sources)} sources.", "completed", "done"
+        )
+        
         return {
             "web_research_result": gathered_contents,
             "sources_gathered": gathered_sources,
             "research_loop_count": current_loop + 1,
+            "activity_feed": [activity_start, activity_end],
         }
     
     except Exception as e:
@@ -292,6 +306,10 @@ def search_kb_index(state: OverallState, config: RunnableConfig) -> Dict:
     Node for the internal KB path. Searches the KB index to find relevant file paths.
     """
     kb_logger.info("Searching KB index for relevant files")
+
+    activity_start = create_activity(
+        "search_index", "Research", "Searching knowledge base index...", None, "in_progress", "search"
+    )
     
     try:
         configurable = Configuration.from_runnable_config(config)
@@ -321,13 +339,18 @@ def search_kb_index(state: OverallState, config: RunnableConfig) -> Dict:
         
         if not result.file_paths:
             kb_logger.warning("No relevant files found in KB index")
-            return {
-                "messages": [AIMessage(content="I could not find any relevant documents in the internal knowledge base for your query.")],
-                "relevant_file_paths": [] 
-            }
+            activity_end = create_activity(
+                "search_index", "Research", "No relevant documents found", None, "error", "error"
+            )
+            return {"messages": ..., "activity_feed": [activity_start, activity_end]}
+
 
         kb_logger.info(f"Found {len(result.file_paths)} relevant files: {result.file_paths}")
-        return {"relevant_file_paths": result.file_paths}
+        activity_end = create_activity(
+            "search_index", "Research", "Searched knowledge base index", 
+            f"Found {len(result.file_paths)} potentially relevant files.", "completed", "done"
+        )
+        return {"relevant_file_paths": result.file_paths, "activity_feed": [activity_start, activity_end]}
     
     except Exception as e:
         kb_logger.error(f"Error in search_kb_index: {str(e)}")
@@ -337,28 +360,40 @@ def search_kb_index(state: OverallState, config: RunnableConfig) -> Dict:
 @log_execution_time
 def retrieve_kb_content(state: OverallState, config: RunnableConfig) -> Dict:
     """
-    Node that retrieves the full content of the files identified by the index search.
+    Consumes the generator from the KB tool to stream progress and retrieve content.
     """
     file_paths = state.get("relevant_file_paths", [])
-    
-    kb_logger.info(f"Retrieving content for {len(file_paths)} files")
+    kb_logger.info(f"Retrieving content for {len(file_paths)} files via generator.")
     
     if not file_paths:
-        kb_logger.warning("No relevant file paths provided for content retrieval")
-        return {"web_research_result": ["No relevant file paths were provided to retrieve content."]}
+        kb_logger.warning("No relevant file paths provided for content retrieval.")
+        return {"web_research_result": []}
 
     try:
-        # Use the tool to get content for the specific paths
-        kb_logger.info(f"Retrieving content for paths: {file_paths}")
-        retrieved_content = internal_kb_tool_instance.retrieve_content_by_paths(file_paths)
+        all_activities = []
+        all_content_chunks = []
+
+        # Consume the generator from the tool
+        tool_generator = internal_kb_tool_instance.stream_content_by_paths(file_paths)
         
-        kb_logger.info(f"Successfully retrieved content. Length: {len(retrieved_content)} characters")
-        
-        # We store the result in 'web_research_result' for consistency with the final answer node
-        return {"web_research_result": [retrieved_content]}
+        for progress_update in tool_generator:
+            # Collect each activity update
+            all_activities.append(progress_update.activity)
+            # Collect each piece of content
+            if progress_update.content_chunk:
+                all_content_chunks.append(progress_update.content_chunk)
+
+        # Join all the content chunks together for the final answer
+        final_content = "\n".join(all_content_chunks)
+        kb_logger.info(f"Generator finished. Total content length: {len(final_content)} characters.")
+
+        return {
+            "web_research_result": [final_content] if final_content else [],
+            "activity_feed": all_activities
+        }
     
     except Exception as e:
-        kb_logger.error(f"Error in retrieve_kb_content: {str(e)}")
+        kb_logger.error(f"Error in retrieve_kb_content while consuming generator: {str(e)}")
         raise
 
 # --- Shared Nodes ---
@@ -446,6 +481,10 @@ def finalize_answer(state: OverallState, config: RunnableConfig) -> Dict:
     """
     main_logger.info("Finalizing answer based on gathered research")
     
+    # Activity feed start
+    activity_start = create_activity(
+        "synthesize", "Synthesis", "Composing final answer...", None, "in_progress", "synthesize"
+    )
     try:
         configurable = Configuration.from_runnable_config(config)
         reasoning_model = configurable.answer_model
@@ -483,7 +522,12 @@ def finalize_answer(state: OverallState, config: RunnableConfig) -> Dict:
             main_logger.info(f"Processed citations: {len(unique_sources)} unique sources used")
         
         main_logger.info("Answer finalization completed successfully")
-        return {"messages": [AIMessage(content=result.content)], "sources_gathered": unique_sources}
+        # Activity feed end
+        activity_end = create_activity(
+            "synthesize", "Synthesis", "Answer composed", f"Answer length: {len(result.content)} characters.", "completed", "done"
+        )
+        activity_feed = state.get("activity_feed", []) + [activity_start, activity_end]
+        return {"messages": [AIMessage(content=result.content)], "sources_gathered": unique_sources, "activity_feed": [activity_start, activity_end]}
     
     except Exception as e:
         main_logger.error(f"Error in finalize_answer: {str(e)}")

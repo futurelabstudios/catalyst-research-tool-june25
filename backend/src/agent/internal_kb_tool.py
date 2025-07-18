@@ -2,11 +2,13 @@ import os
 import xml.etree.ElementTree as ET
 import logging
 import time
-from typing import List, Dict, Optional, Tuple, Any
+from typing import Generator, List, Dict, Optional, Tuple, Any
 from pathlib import Path
 from functools import lru_cache, wraps
 from dataclasses import dataclass
 from enum import Enum
+
+from agent.activity import RetrievalProgress, create_activity
 
 # Configure logging with more detailed format
 logging.basicConfig(
@@ -392,27 +394,164 @@ class SurgicalKBTool:
         result = "\n".join(index_parts)
         logger.debug(f"Generated index text length: {len(result)} characters")
         return result
+    
+    @property
+    def retrieved_paths(self) -> List[str]:
+        """Get the list of successfully retrieved paths from the last stream operation."""
+        return getattr(self, '_retrieved_paths', [])
 
-    @log_performance
-    def retrieve_content_by_paths(self, paths: List[str]) -> str:
+    @property
+    def failed_paths(self) -> List[str]:
+        """Get the list of failed paths from the last stream operation."""
+        return getattr(self, '_failed_paths', [])
+
+    @property
+    def retrieval_errors(self) -> List[str]:
+        """Get the list of errors from the last stream operation."""
+        return getattr(self, '_errors', [])
+    
+    def stream_content_by_paths(self, paths: List[str]) -> Generator[RetrievalProgress, None, None]:
         """
-        Retrieve the full content for a list of specific file paths.
+        Streams content retrieval progress, yielding an update for each processed file.
+        This generator is designed to power real-time progress bars and includes search statistics.
         
         Args:
             paths: List of file paths to retrieve content for.
             
-        Returns:
-            Formatted content string with clear file separators.
+        Yields:
+            RetrievalProgress objects with activity updates, content chunks, and search statistics.
         """
+        logger.info(f"Starting to stream content for {len(paths)} paths.")
+        
+        # Initialize statistics tracking as instance variables for external access
+        self._retrieved_paths = []
+        self._failed_paths = []
+        self._errors = []
+        
+        if not self._is_loaded or not paths:
+            status = "error" if not self._is_loaded else "completed"
+            details = "Knowledge base not loaded." if not self._is_loaded else "No paths provided."
+            if not self._is_loaded:
+                self._errors.append("Knowledge base not loaded.")
+            yield RetrievalProgress(
+                activity=create_activity(
+                    "retrieve_content", "Research", "Content Retrieval", details, status, "error"
+                )
+            )
+            return # Stop the generator
+
+        documents_section = self._xml_root.find('documents')
+        if documents_section is None:
+            error_msg = "XML Error: Could not find <documents> section."
+            self._errors.append(error_msg)
+            yield RetrievalProgress(
+                activity=create_activity(
+                    "retrieve_content", "Research", "Content Retrieval Failed",
+                    error_msg, "error", "error"
+                )
+            )
+            return
+
+        # 1. Yield the initial "in_progress" state
+        initial_activity = create_activity(
+            id="retrieve_content", phase="Research", title=f"Reading {len(paths)} documents...",
+            details="Preparing to fetch file contents.", status="in_progress", icon="read",
+            progress={"current": 0, "total": len(paths)}
+        )
+        yield RetrievalProgress(
+            activity=initial_activity
+        )
+
+        total_content_size = 0
+
+        for i, path in enumerate(paths):
+            content_chunk = None
+            try:
+                content = self._retrieve_single_file_content(documents_section, path)
+                if content:
+                    content_size = len(content.encode('utf-8'))
+                    if total_content_size + content_size > self.max_content_size:
+                        logger.warning(f"Content size limit exceeded. Truncating results at {path}.")
+                        break # Stop processing more files
+                    
+                    total_content_size += content_size
+                    self._retrieved_paths.append(path)
+                    content_chunk = f"--- FILE PATH: {path} ---\n{content.strip()}\n"
+                else:
+                    # Content was empty or None
+                    self._failed_paths.append(path)
+                    self._errors.append(f"No content found for path: {path}")
+                
+                # 2. Yield a progress update after each file
+                progress_activity = create_activity(
+                    id="retrieve_content", phase="Research", title=f"Reading documents...",
+                    details=f"Processed: {os.path.basename(path)}", status="in_progress", icon="read",
+                    progress={"current": i + 1, "total": len(paths)}
+                )
+                yield RetrievalProgress(
+                    activity=progress_activity, 
+                    content_chunk=content_chunk
+                )
+
+            except Exception as e:
+                error_msg = f"Error streaming content for {path}: {e}"
+                logger.error(error_msg, exc_info=True)
+                self._failed_paths.append(path)
+                self._errors.append(error_msg)
+                
+                # Yield error update
+                error_activity = create_activity(
+                    id="retrieve_content", phase="Research", title=f"Reading documents...",
+                    details=f"Error processing: {os.path.basename(path)}", status="in_progress", icon="read",
+                    progress={"current": i + 1, "total": len(paths)}
+                )
+                yield RetrievalProgress(
+                    activity=error_activity,
+                    content_chunk=None
+                )
+
+        # 3. Yield the final "completed" state with comprehensive statistics
+        success_count = len(self._retrieved_paths)
+        failed_count = len(self._failed_paths)
+        error_count = len(self._errors)
+        
+        final_details = f"Successfully read content for {success_count} out of {len(paths)} files."
+        if failed_count > 0:
+            final_details += f" Failed: {failed_count}."
+        if error_count > 0:
+            final_details += f" Errors: {error_count}."
+        
+        final_status = "completed" if success_count > 0 else "error"
+        final_activity = create_activity(
+            id="retrieve_content", phase="Research", title="Finished reading documents",
+            details=final_details, status=final_status, icon="done",
+            progress={"current": len(paths), "total": len(paths)}
+        )
+        
+        yield RetrievalProgress(
+            activity=final_activity
+        )
+
+    @log_performance
+    def retrieve_by_paths(self, paths: List[str]) -> str:
+        """
+        Retrieve content by paths and access statistics.
+        """
+        content_parts = []
+
         logger.info(f"Retrieving content for {len(paths)} paths")
         logger.debug(f"Requested paths: {paths}")
+
+        # Consume the generator to get all content
+        for progress in self.stream_content_by_paths(paths):
+            if progress.content_chunk:
+                content_parts.append(progress.content_chunk)
+
         
-        result = self.retrieve_content_by_paths_detailed(paths)
-        
-        logger.info(f"Content retrieval complete - Success: {len(result.retrieved_paths)}, "
-                   f"Failed: {len(result.failed_paths)}, Errors: {len(result.errors)}")
-        
-        return result.content
+        logger.info(f"Content retrieval complete - Success: {len(self.retrieved_paths)}, "
+                   f"Failed: {len(self.failed_paths)}, Errors: {len(self.errors)}")
+
+        return "\n".join(content_parts)
 
     @log_performance
     def retrieve_content_by_paths_detailed(self, paths: List[str]) -> RetrievalResult:
@@ -540,11 +679,8 @@ class SurgicalKBTool:
             File content or None if not found.
         """
 
-        # First, normalize the path we are looking for, just in case.
         target_path = path.replace('\\', '/')
 
-        # Find all possible document nodes.
-        # The structure is '//documents/document'.
         all_documents = documents_section.findall('document')
 
         # Loop through the documents in Python
@@ -552,16 +688,12 @@ class SurgicalKBTool:
             # Find the path element within the current document's metadata
             path_element = doc_element.find('metadata/path')
             if path_element is not None and path_element.text is not None:
-                # Normalize the path from the XML for a reliable comparison
                 xml_path = path_element.text.replace('\\', '/')
-                
-                # If the paths match, we've found our document
                 if xml_path == target_path:
                     content = doc_element.findtext('content')
                     if content:
                         return content
         
-        # If the loop finishes without finding a match, return None
         return None
 
     @log_performance

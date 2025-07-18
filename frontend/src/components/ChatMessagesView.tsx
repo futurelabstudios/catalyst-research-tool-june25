@@ -8,10 +8,8 @@ import { useState, ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
-import {
-  ActivityTimeline,
-  ProcessedEvent,
-} from "@/components/ActivityTimeline"; // Assuming ActivityTimeline is in the same dir or adjust path
+import { ActivityTimeline } from "@/components/ActivityTimeline"; // Updated import
+import type { Activity } from "@/lib/activity-types";
 
 // Markdown component props type from former ReportView
 type MdComponentProps = {
@@ -158,19 +156,20 @@ const HumanMessageBubble: React.FC<HumanMessageBubbleProps> = ({
   );
 };
 
-// Props for AiMessageBubble
+// Props for AiMessageBubble - UPDATED
 interface AiMessageBubbleProps {
   message: Message;
-  historicalActivity: ProcessedEvent[] | undefined;
-  liveActivity: ProcessedEvent[] | undefined;
+  historicalActivity: Activity[] | undefined;
+  liveActivity: Activity[] | undefined;
   isLastMessage: boolean;
   isOverallLoading: boolean;
   mdComponents: typeof mdComponents;
   handleCopy: (text: string, messageId: string) => void;
   copiedMessageId: string | null;
+  onRetryActivity?: (activityId: string) => void; // NEW: Added retry prop
 }
 
-// AiMessageBubble Component
+// AiMessageBubble Component - UPDATED
 const AiMessageBubble: React.FC<AiMessageBubbleProps> = ({
   message,
   historicalActivity,
@@ -180,6 +179,7 @@ const AiMessageBubble: React.FC<AiMessageBubbleProps> = ({
   mdComponents,
   handleCopy,
   copiedMessageId,
+  onRetryActivity,
 }) => {
   // Determine which activity events to show and if it's for a live loading message
   const activityForThisBubble =
@@ -191,8 +191,9 @@ const AiMessageBubble: React.FC<AiMessageBubbleProps> = ({
       {activityForThisBubble && activityForThisBubble.length > 0 && (
         <div className="mb-3 border-b border-neutral-700 pb-3 text-xs">
           <ActivityTimeline
-            processedEvents={activityForThisBubble}
+            activities={activityForThisBubble}
             isLoading={isLiveActivityForThisBubble}
+            onRetryActivity={onRetryActivity}
           />
         </div>
       )}
@@ -220,6 +221,7 @@ const AiMessageBubble: React.FC<AiMessageBubbleProps> = ({
   );
 };
 
+// UPDATED: Props interface for ChatMessagesView
 interface ChatMessagesViewProps {
   messages: Message[];
   isLoading: boolean;
@@ -231,8 +233,9 @@ interface ChatMessagesViewProps {
     useWebSearch: boolean
   ) => void;
   onCancel: () => void;
-  liveActivityEvents: ProcessedEvent[];
-  historicalActivities: Record<string, ProcessedEvent[]>;
+  liveActivities: Activity[]; // UPDATED: Changed from liveActivityEvents
+  historicalActivities: Record<string, Activity[]>; // UPDATED: Changed from ProcessedEvent[]
+  onRetryActivity?: (activityId: string) => void; // NEW: Added retry prop
 }
 
 export function ChatMessagesView({
@@ -241,8 +244,9 @@ export function ChatMessagesView({
   scrollAreaRef,
   onSubmit,
   onCancel,
-  liveActivityEvents,
+  liveActivities, // UPDATED: Updated prop name
   historicalActivities,
+  onRetryActivity, // NEW: Added retry prop
 }: ChatMessagesViewProps) {
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
 
@@ -278,12 +282,13 @@ export function ChatMessagesView({
                     <AiMessageBubble
                       message={message}
                       historicalActivity={historicalActivities[message.id!]}
-                      liveActivity={liveActivityEvents} // Pass global live events
+                      liveActivity={liveActivities} // UPDATED: Pass live activities
                       isLastMessage={isLast}
                       isOverallLoading={isLoading} // Pass global loading state
                       mdComponents={mdComponents}
                       handleCopy={handleCopy}
                       copiedMessageId={copiedMessageId}
+                      onRetryActivity={onRetryActivity} // NEW: Pass retry handler
                     />
                   )}
                 </div>
@@ -297,11 +302,12 @@ export function ChatMessagesView({
                 {" "}
                 {/* AI message row structure */}
                 <div className="relative group max-w-[85%] md:max-w-[80%] rounded-xl p-3 shadow-sm break-words bg-neutral-800 text-neutral-100 rounded-bl-none w-full min-h-[56px]">
-                  {liveActivityEvents.length > 0 ? (
+                  {liveActivities.length > 0 ? ( // UPDATED: Use liveActivities
                     <div className="text-xs">
                       <ActivityTimeline
-                        processedEvents={liveActivityEvents}
+                        activities={liveActivities} // UPDATED: Changed from processedEvents
                         isLoading={true}
+                        onRetryActivity={onRetryActivity} // NEW: Pass retry handler
                       />
                     </div>
                   ) : (

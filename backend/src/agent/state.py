@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, TypedDict, Optional
 
+from agent.activity import Activity
 from langgraph.graph import add_messages
 from typing_extensions import Annotated
 
@@ -23,6 +24,7 @@ class OverallState(TypedDict):
     reasoning_model: str
     use_web_search: bool
     relevant_file_paths: Optional[List[str]]
+    activity_feed: Annotated[Activity, operator.add]
 
 
 class ReflectionState(TypedDict):
