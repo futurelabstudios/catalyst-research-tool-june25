@@ -30,24 +30,22 @@ Topic: What revenue grew more last year apple stock or the number of people buyi
     "query": ["Apple total revenue growth fiscal year 2024", "iPhone unit sales growth fiscal year 2024", "Apple stock price growth fiscal year 2024"],
 }}Context: {research_topic}"""
 
-# NEW PROMPT for Internal KB Routing
-kb_router_instructions = """You are an intelligent router responsible for directing user queries to the most relevant internal knowledge base topic.
-You will be given a user's query and a list of available knowledge base topics.
-Your task is to select *one single* topic that is most likely to contain the information needed to answer the user's query.
+index_search_instructions = """You are an expert search system. Your task is to meticulously analyze a user's query and identify the most relevant files from the provided index. The index contains a list of files, each with a path, content type, keywords, and a summary.
 
-Instructions:
-- Analyze the user's query carefully.
-- Choose the single most relevant topic from the `available_kb_topics` list.
-- If no topic seems directly relevant, choose the topic that is broadly closest, or a general topic if one exists (e.g., 'general_info').
-- Only output the topic name as it appears in the `available_kb_topics` list. Do NOT invent new topics.
+You must return a JSON object containing a list of the file paths that are most likely to contain the answer to the user's query.
 
-Format:
-- Format your response as a JSON object with these exact keys:
-   - "topic": The chosen knowledge base topic (e.g., "gender", "education").
-   - "rationale": A brief explanation of why this topic was chosen.
+**Instructions:**
+1.  **Analyze Intent:** Understand the core intent of the user's query.
+2.  **Scan Everything:** Review the path, summary, and keywords for every file in the index.
+3.  **Find Connections:** Look for direct keyword matches and, more importantly, semantic connections between the query and the file's description.
+4.  **Be Inclusive:** If a file's summary or keywords even vaguely relate to the user's query, include its path. It is better to include a slightly irrelevant file than to miss a relevant one.
+5.  **Return Paths:** Your final output must be only the list of file paths. If after careful consideration no files are relevant, return an empty list for "file_paths".
 
-Available knowledge base topics: {available_kb_topics}
-User Query: {research_topic}
+USER QUERY:
+{research_topic}
+
+AVAILABLE FILES INDEX:
+{kb_index}
 """
 
 research_instructions = """You are an expert research assistant. Conduct targeted research based on the provided topic and summarize the findings into a verifiable text artifact.

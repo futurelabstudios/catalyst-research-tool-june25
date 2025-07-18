@@ -1,22 +1,18 @@
 import os
-from typing import List
+import logging
+import time
+from typing import List, Dict
+from functools import wraps
 
-from agent.tools_and_schemas import SearchQueryList, Reflection, ChosenKBTopic # NEW: Import ChosenKBTopic
+from agent.tools_and_schemas import SearchQueryList, Reflection, RelevantFileList
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage
-from langgraph.types import Send
-from langgraph.graph import StateGraph
-from langgraph.graph import START, END
+from langgraph.graph import StateGraph, START, END
 from langchain_core.runnables import RunnableConfig
 from google.genai import Client
 from langchain_core.tools import tool
 
-from agent.state import (
-    OverallState,
-    QueryGenerationState,
-    ReflectionState,
-    WebSearchState, # Keep WebSearchState for consistency in data flow for research_step
-)
+from agent.state import OverallState
 from agent.configuration import Configuration
 from agent.prompts import (
     get_current_date,
@@ -24,7 +20,7 @@ from agent.prompts import (
     research_instructions,
     reflection_instructions,
     answer_instructions,
-    kb_router_instructions, # NEW: Import KB router prompt
+    index_search_instructions,
 )
 from langchain_google_genai import ChatGoogleGenerativeAI
 from agent.utils import (
@@ -33,336 +29,526 @@ from agent.utils import (
     insert_citation_markers,
     resolve_urls,
 )
-from agent.internal_kb_tool import InternalKnowledgeBaseTool
+from agent.internal_kb_tool import SurgicalKBTool
 
 load_dotenv()
 
-if os.getenv("GEMINI_API_KEY") is None:
-    raise ValueError("GEMINI_API_KEY is not set")
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('research_agent.log'),
+        logging.StreamHandler()
+    ]
+)
 
-# Initialize the Internal Knowledge Base Tool (now scans directory)
-internal_kb_tool_instance = InternalKnowledgeBaseTool()
+# Create specialized loggers
+main_logger = logging.getLogger('research_agent.main')
+search_logger = logging.getLogger('research_agent.search')
+kb_logger = logging.getLogger('research_agent.kb')
+performance_logger = logging.getLogger('research_agent.performance')
+state_logger = logging.getLogger('research_agent.state')
 
-# Used for Google Search API
-genai_client = Client(api_key=os.getenv("GEMINI_API_KEY"))
+def log_execution_time(func):
+    """Decorator to log execution time of functions"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        func_name = func.__name__
+        performance_logger.info(f"Starting execution of {func_name}")
+        
+        try:
+            result = func(*args, **kwargs)
+            end_time = time.time()
+            execution_time = end_time - start_time
+            performance_logger.info(f"Completed {func_name} in {execution_time:.2f} seconds")
+            return result
+        except Exception as e:
+            end_time = time.time()
+            execution_time = end_time - start_time
+            performance_logger.error(f"Failed {func_name} after {execution_time:.2f} seconds: {str(e)}")
+            raise
+    return wrapper
 
-# Wrap the Google Search logic into a LangChain tool for consistency and easier use
+def log_state_changes(func):
+    """Decorator to log state changes in nodes"""
+    @wraps(func)
+    def wrapper(state: OverallState, config: RunnableConfig = None, *args, **kwargs):
+        func_name = func.__name__
+        
+        # Log input state (selective logging to avoid spam)
+        state_logger.info(f"[{func_name}] Input state keys: {list(state.keys())}")
+        if 'messages' in state:
+            state_logger.info(f"[{func_name}] Number of messages: {len(state['messages'])}")
+        if 'search_query' in state:
+            state_logger.info(f"[{func_name}] Search queries: {state['search_query']}")
+        if 'research_loop_count' in state:
+            state_logger.info(f"[{func_name}] Research loop count: {state['research_loop_count']}")
+        
+        try:
+            result = func(state, config, *args, **kwargs)
+            
+            # Log output state changes
+            if result:
+                state_logger.info(f"[{func_name}] Output state changes: {list(result.keys())}")
+                for key, value in result.items():
+                    if key == 'messages':
+                        state_logger.info(f"[{func_name}] Added {len(value)} messages")
+                    elif key == 'sources_gathered':
+                        state_logger.info(f"[{func_name}] Gathered {len(value)} sources")
+                    elif key == 'web_research_result':
+                        state_logger.info(f"[{func_name}] Research results: {len(value)} items")
+                    elif key == 'relevant_file_paths':
+                        state_logger.info(f"[{func_name}] Found {len(value)} relevant files: {value}")
+                    else:
+                        state_logger.debug(f"[{func_name}] {key}: {value}")
+            
+            return result
+        except Exception as e:
+            state_logger.error(f"[{func_name}] Error processing state: {str(e)}")
+            raise
+    return wrapper
+
+gemini_api_key = os.getenv("GEMINI_API_KEY")
+if not gemini_api_key:
+    main_logger.error("GEMINI_API_KEY is not set in the environment or .env file")
+    raise ValueError("GEMINI_API_KEY is not set in the environment or .env file")
+
+main_logger.info("Initializing research agent components")
+
+# Instantiate the new surgical tool
+try:
+    internal_kb_tool_instance = SurgicalKBTool(kb_file_path="public/cg_extracted_normalized.xml")
+    kb_logger.info("Successfully initialized internal KB tool")
+except Exception as e:
+    kb_logger.error(f"Failed to initialize internal KB tool: {str(e)}")
+    raise
+
+try:
+    genai_client = Client(api_key=gemini_api_key)
+    main_logger.info("Successfully initialized Google GenAI client")
+except Exception as e:
+    main_logger.error(f"Failed to initialize Google GenAI client: {str(e)}")
+    raise
+
 @tool
+@log_execution_time
 def google_search_tool(query: str) -> dict:
-    """Performs a Google search and returns a summarized result with citations.
-    Returns a dictionary with 'content' and 'sources'."""
-    configurable = Configuration.from_runnable_config(None) # Dummy config to get model name
+    """Performs a Google search and returns a summarized result with citations."""
+    search_logger.info(f"Performing Google search for query: '{query}'")
     
-    llm_for_search = ChatGoogleGenerativeAI(
-        model=configurable.query_generator_model,
-        temperature=0,
-        max_retries=2,
-        api_key=os.getenv("GEMINI_API_KEY"),
-    )
-
-    formatted_prompt = research_instructions.format(
-        current_date=get_current_date(),
-        research_topic=query,
-    )
-
-    response = genai_client.models.generate_content(
-        model=llm_for_search.model_name,
-        contents=formatted_prompt,
-        config={
-            "tools": [{"google_search": {}}],
-            "temperature": 0,
-        },
-    )
-
-    sources_gathered = []
-    modified_text = response.text
-    if hasattr(response.candidates[0], 'grounding_metadata') and response.candidates[0].grounding_metadata:
-        resolved_urls = resolve_urls(
-            response.candidates[0].grounding_metadata.grounding_chunks, 0 # ID might need to be dynamic for real parallel execution
+    try:
+        configurable = Configuration.from_runnable_config(None)
+        search_logger.debug(f"Using search model: {configurable.query_generator_model}")
+        
+        llm_for_search = ChatGoogleGenerativeAI(
+            model=configurable.query_generator_model, temperature=0, max_retries=2, api_key=gemini_api_key
         )
-        citations = get_citations(response, resolved_urls)
-        modified_text = insert_citation_markers(response.text, citations)
-        sources_gathered = [item for citation in citations for item in citation["segments"]]
+        
+        formatted_prompt = research_instructions.format(
+            current_date=get_current_date(), research_topic=query
+        )
+        search_logger.debug(f"Formatted search prompt length: {len(formatted_prompt)} characters")
+        
+        response = genai_client.models.generate_content(
+            model=llm_for_search.model_name,
+            contents=formatted_prompt,
+            config={"tools": [{"google_search": {}}], "temperature": 0},
+        )
+        
+        sources_gathered = []
+        modified_text = response.text
+        search_logger.info(f"Received search response of length: {len(modified_text)} characters")
+        
+        if hasattr(response.candidates[0], 'grounding_metadata') and response.candidates[0].grounding_metadata:
+            search_logger.info("Processing grounding metadata and citations")
+            resolved_urls = resolve_urls(response.candidates[0].grounding_metadata.grounding_chunks, 0)
+            citations = get_citations(response, resolved_urls)
+            modified_text = insert_citation_markers(response.text, citations)
+            sources_gathered = [item for citation in citations for item in citation["segments"]]
+            search_logger.info(f"Found {len(sources_gathered)} sources with citations")
+        else:
+            search_logger.warning("No grounding metadata found in search response")
+        
+        search_logger.info(f"Successfully completed Google search for query: '{query}'")
+        return {"content": modified_text, "sources": sources_gathered}
     
-    return {"content": modified_text, "sources": sources_gathered}
+    except Exception as e:
+        search_logger.error(f"Error in Google search for query '{query}': {str(e)}")
+        raise
 
+# =========================================================================
+# NODES
+# =========================================================================
 
-# Nodes
-def determine_tool_and_initial_action(state: OverallState, config: RunnableConfig) -> OverallState:
+@log_state_changes
+@log_execution_time
+def route_initial_query(state: OverallState, config: RunnableConfig) -> Dict:
     """
-    LangGraph node to determine whether to use web search or internal KB,
-    and then prepare the state for the next step (either generating web queries or routing KB).
+    Node that determines whether to use the web search path or the internal KB path.
+    This is the new entry point for the graph.
     """
-    configurable = Configuration.from_runnable_config(config)
-    user_query = get_research_topic(state["messages"])
+    main_logger.info("Routing initial query to determine search path")
     
-    if configurable.use_web_search:
-        print("DEBUG: Using Web Search path. Generating initial queries.")
+    try:
+        configurable = Configuration.from_runnable_config(config)
+        use_web_search = configurable.use_web_search
+        
+        main_logger.info(f"Configuration determined: use_web_search = {use_web_search}")
+        
+        if use_web_search:
+            main_logger.info("Routing to web search path")
+            return {"next_node": "generate_web_queries"}
+        else:
+            main_logger.info("Routing to internal KB path")
+            return {"next_node": "search_kb_index"}
+    
+    except Exception as e:
+        main_logger.error(f"Error in route_initial_query: {str(e)}")
+        raise
+
+# --- Web Search Path ---
+@log_state_changes
+@log_execution_time
+def generate_web_queries(state: OverallState, config: RunnableConfig) -> Dict:
+    """
+    Node for the web search path. Generates initial search queries.
+    """
+    main_logger.info("Generating web search queries")
+    
+    try:
+        configurable = Configuration.from_runnable_config(config)
+        user_query = get_research_topic(state["messages"])
+        
+        main_logger.info(f"Research topic extracted: '{user_query}'")
+        main_logger.info(f"Target number of queries: {configurable.number_of_initial_queries}")
+        
         llm = ChatGoogleGenerativeAI(
-            model=configurable.query_generator_model,
-            temperature=1.0,
-            max_retries=2,
-            api_key=os.getenv("GEMINI_API_KEY"),
+            model=configurable.query_generator_model, temperature=1.0, max_retries=2, api_key=gemini_api_key
         )
         structured_llm = llm.with_structured_output(SearchQueryList)
-
-        current_date = get_current_date()
+        
         formatted_prompt = query_writer_instructions.format(
-            current_date=current_date,
+            current_date=get_current_date(),
             research_topic=user_query,
             number_queries=configurable.number_of_initial_queries,
         )
         
-        result = structured_llm.invoke(formatted_prompt)
-        return {"query_list": result.query, "use_web_search": True}
-    else:
-        print("DEBUG: Using Internal Knowledge Base path. Routing to KB topic selection.")
-        llm = ChatGoogleGenerativeAI(
-            model=configurable.query_generator_model, # Using query_generator_model for routing as well
-            temperature=0.0, # Keep temperature low for routing
-            max_retries=2,
-            api_key=os.getenv("GEMINI_API_KEY"),
-        )
-        structured_llm = llm.with_structured_output(ChosenKBTopic)
-
-        available_topics_str = internal_kb_tool_instance.get_available_topics_for_llm()
-        formatted_prompt = kb_router_instructions.format(
-            available_kb_topics=available_topics_str,
-            research_topic=user_query,
-        )
+        main_logger.debug(f"Generated prompt length: {len(formatted_prompt)} characters")
         
-        try:
-            chosen_topic_result = structured_llm.invoke(formatted_prompt)
-            chosen_topic = chosen_topic_result.topic
-            print(f"DEBUG: LLM chose internal KB topic: '{chosen_topic}'")
-            # We will use 'search_query' field to store the chosen KB topic for research_step to consume
-            # This allows research_step to keep a consistent input state type.
-            return {"search_query": [chosen_topic], "use_web_search": False, "chosen_kb_topic": chosen_topic}
-        except Exception as e:
-            print(f"ERROR: Failed to route internal KB query: {e}. Returning an error message.")
-            # Fallback if LLM fails to choose a topic
-            return {
-                "web_research_result": [f"I could not determine a relevant internal knowledge base topic for your query. Error: {e}. Available topics: {available_topics_str}"],
-                "messages": [AIMessage(content=f"I could not determine a relevant internal knowledge base topic for your query. Error: {e}. Available topics: {available_topics_str}")],
-                "use_web_search": False, # Still indicate internal KB was attempted
-                "chosen_kb_topic": "error_fallback"
-            }
-
-
-def research_step(state: OverallState, config: RunnableConfig) -> OverallState:
-    """LangGraph node that performs research using either internal KB or web search."""
-    configurable = Configuration.from_runnable_config(config)
-
-    result_content = ""
-    result_sources = []
+        result = structured_llm.invoke(formatted_prompt)
+        
+        main_logger.info(f"Generated {len(result.query)} search queries: {result.query}")
+        
+        return {"search_query": result.query}
     
-    # Initialize counts for the current research loop if they don't exist
-    if state.get("initial_search_query_count") is None:
-        state["initial_search_query_count"] = configurable.number_of_initial_queries
-    if state.get("max_research_loops") is None:
-        state["max_research_loops"] = configurable.max_research_loops
+    except Exception as e:
+        main_logger.error(f"Error in generate_web_queries: {str(e)}")
+        raise
+
+@log_state_changes
+@log_execution_time
+def perform_web_search(state: OverallState, config: RunnableConfig) -> Dict:
+    """
+    Node that performs the web search for a given list of queries.
+    """
+    queries = state.get("search_query", [])
+    current_loop = state.get("research_loop_count", 0)
     
-    # Determine the number of queries to run in this loop
-    current_loop_queries: List[str] = []
-    if configurable.use_web_search:
-        # For web search, queries come from query_list (generated in determine_tool_and_initial_action or reflection)
-        current_loop_queries = state.get("query_list", [])
-        if not current_loop_queries: # If query_list is empty, use a single generic query for initial search
-             current_loop_queries = [get_research_topic(state["messages"])] # Fallback if no specific queries generated
-    else:
-        # For internal KB, the "query" is actually the chosen topic from the previous step
-        # There's only one "query" (topic) per KB lookup in this flow
-        if state.get("chosen_kb_topic"):
-            current_loop_queries = [state["chosen_kb_topic"]]
-        else:
-            print("ERROR: Internal KB path active but no chosen_kb_topic in state.")
-            result_content = "Internal KB path active but no topic was selected or available."
-            # Set a dummy search_query for state consistency, even if it's an error.
-            return {
-                "sources_gathered": result_sources,
-                "search_query": ["error_no_topic"],
-                "web_research_result": [result_content],
-                "research_loop_count": state.get("research_loop_count", 0) + 1,
-                "number_of_ran_queries": len(state.get("search_query", [])),
-            }
+    search_logger.info(f"Starting web search iteration {current_loop + 1}")
+    search_logger.info(f"Performing web search for {len(queries)} queries: {queries}")
+    
+    try:
+        gathered_contents = []
+        gathered_sources = []
+        
+        for i, query in enumerate(queries):
+            search_logger.info(f"Processing query {i+1}/{len(queries)}: '{query}'")
             
-    # Process each query/topic in the current loop (even if it's just one for KB)
-    gathered_contents = []
-    gathered_sources = []
-    ran_queries = state.get("search_query", []) # Keep track of all queries run
-    
-    for query_or_topic in current_loop_queries:
-        if configurable.use_web_search:
-            print(f"DEBUG: Performing Web Search for query: '{query_or_topic}'")
-            tool_output = google_search_tool.invoke({"query": query_or_topic})
+            tool_output = google_search_tool.invoke({"query": query})
             gathered_contents.append(tool_output["content"])
             gathered_sources.extend(tool_output["sources"])
-        else:
-            print(f"DEBUG: Retrieving content from Internal Knowledge Base for topic: '{query_or_topic}'")
-            # Pass topic_name as the first argument, and config in kwargs
-            kb_content = internal_kb_tool_instance.invoke(query_or_topic, config=config)
-            gathered_contents.append(kb_content)
-            # Internal KB tool does not provide structured web citations, so sources_gathered remains empty
             
-        ran_queries.append(query_or_topic) # Add to list of all queries run
+            search_logger.info(f"Query {i+1} completed. Content length: {len(tool_output['content'])}, Sources: {len(tool_output['sources'])}")
 
-    return {
-        "sources_gathered": gathered_sources, # Will be empty for internal KB
-        "search_query": ran_queries, # Stores all queries/topics ever run
-        "web_research_result": gathered_contents, # Stores all collected contents
-        "research_loop_count": state.get("research_loop_count", 0) + 1,
-        "number_of_ran_queries": len(ran_queries),
-    }
-
-
-def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
-    """LangGraph node that identifies knowledge gaps and generates potential follow-up queries."""
-    configurable = Configuration.from_runnable_config(config)
-    reasoning_model = configurable.reflection_model # Use model from config
-
-    current_date = get_current_date()
-    formatted_prompt = reflection_instructions.format(
-        current_date=current_date,
-        research_topic=get_research_topic(state["messages"]),
-        summaries="\n\n---\n\n".join(state["web_research_result"]),
-    )
+        search_logger.info(f"Web search completed. Total content items: {len(gathered_contents)}, Total sources: {len(gathered_sources)}")
+        
+        return {
+            "web_research_result": gathered_contents,
+            "sources_gathered": gathered_sources,
+            "research_loop_count": current_loop + 1,
+        }
     
-    llm = ChatGoogleGenerativeAI(
-        model=reasoning_model,
-        temperature=1.0,
-        max_retries=2,
-        api_key=os.getenv("GEMINI_API_KEY"),
-    )
-    result = llm.with_structured_output(Reflection).invoke(formatted_prompt)
+    except Exception as e:
+        search_logger.error(f"Error in perform_web_search: {str(e)}")
+        raise
 
-    return {
-        "is_sufficient": result.is_sufficient,
-        "knowledge_gap": result.knowledge_gap,
-        "follow_up_queries": result.follow_up_queries,
-        "research_loop_count": state["research_loop_count"],
-        "number_of_ran_queries": len(state["search_query"]),
-    }
+# --- Internal KB Path ---
+@log_state_changes
+@log_execution_time
+def search_kb_index(state: OverallState, config: RunnableConfig) -> Dict:
+    """
+    Node for the internal KB path. Searches the KB index to find relevant file paths.
+    """
+    kb_logger.info("Searching KB index for relevant files")
+    
+    try:
+        configurable = Configuration.from_runnable_config(config)
+        user_query = get_research_topic(state["messages"])
+        
+        kb_logger.info(f"KB search query: '{user_query}'")
+        kb_logger.info(f"Using model: {configurable.query_generator_model}")
+        
+        llm = ChatGoogleGenerativeAI(
+            model=configurable.index_search_model, temperature=0.0, max_retries=2, api_key=gemini_api_key
+        )
+        structured_llm = llm.with_structured_output(RelevantFileList)
 
+        # Get the entire index from our tool
+        kb_logger.info("Retrieving KB index from tool")
+        kb_index_text = internal_kb_tool_instance.get_index_for_llm()
+        kb_logger.info(f"KB index retrieved. Length: {len(kb_index_text)} characters")
+        
+        formatted_prompt = index_search_instructions.format(
+            research_topic=user_query,
+            kb_index=kb_index_text,
+        )
+        
+        kb_logger.debug(f"Formatted KB search prompt length: {len(formatted_prompt)} characters")
+        
+        result = structured_llm.invoke(formatted_prompt)
+        
+        if not result.file_paths:
+            kb_logger.warning("No relevant files found in KB index")
+            return {
+                "messages": [AIMessage(content="I could not find any relevant documents in the internal knowledge base for your query.")],
+                "relevant_file_paths": [] 
+            }
 
-def evaluate_research(
-    state: ReflectionState,
-    config: RunnableConfig,
-) -> str | List[Send]: # Return type changed for clarity
-    """LangGraph routing function that determines the next step in the research flow."""
-    configurable = Configuration.from_runnable_config(config)
-    max_research_loops = (
-        state.get("max_research_loops")
-        if state.get("max_research_loops") is not None
-        else configurable.max_research_loops
-    )
+        kb_logger.info(f"Found {len(result.file_paths)} relevant files: {result.file_paths}")
+        return {"relevant_file_paths": result.file_paths}
+    
+    except Exception as e:
+        kb_logger.error(f"Error in search_kb_index: {str(e)}")
+        raise
 
-    if state["is_sufficient"] or state["research_loop_count"] >= max_research_loops:
-        return "finalize_answer"
-    else:
-        # If not sufficient and not max loops, continue researching
-        if configurable.use_web_search:
-            # For web search, generate new queries
-            return [
-                Send(
-                    "research_step",
-                    {
-                        "query_list": state["follow_up_queries"], # Pass follow-up queries to research_step
-                        "id": state["number_of_ran_queries"] + int(idx),
-                    },
-                )
-                for idx, follow_up_query in enumerate(state["follow_up_queries"])
-            ]
-        else:
-            # For internal KB, we don't generate follow-up search queries.
-            # The reflection suggested a knowledge gap, but we already sent the whole relevant file.
-            # We should probably go directly to finalize_answer here for internal KB,
-            # as the current setup doesn't support iterative KB refinement from follow-up queries.
-            # Or, we could attempt to re-route to a *different* KB topic if the reflection implies
-            # a different area of the KB might be relevant. For now, let's finalize.
-            print("DEBUG: Internal KB: Reflection indicated knowledge gap, but current flow doesn't support iterative KB search. Finalizing answer.")
+@log_state_changes
+@log_execution_time
+def retrieve_kb_content(state: OverallState, config: RunnableConfig) -> Dict:
+    """
+    Node that retrieves the full content of the files identified by the index search.
+    """
+    file_paths = state.get("relevant_file_paths", [])
+    
+    kb_logger.info(f"Retrieving content for {len(file_paths)} files")
+    
+    if not file_paths:
+        kb_logger.warning("No relevant file paths provided for content retrieval")
+        return {"web_research_result": ["No relevant file paths were provided to retrieve content."]}
+
+    try:
+        # Use the tool to get content for the specific paths
+        kb_logger.info(f"Retrieving content for paths: {file_paths}")
+        retrieved_content = internal_kb_tool_instance.retrieve_content_by_paths(file_paths)
+        
+        kb_logger.info(f"Successfully retrieved content. Length: {len(retrieved_content)} characters")
+        
+        # We store the result in 'web_research_result' for consistency with the final answer node
+        return {"web_research_result": [retrieved_content]}
+    
+    except Exception as e:
+        kb_logger.error(f"Error in retrieve_kb_content: {str(e)}")
+        raise
+
+# --- Shared Nodes ---
+@log_state_changes
+@log_execution_time
+def reflection(state: OverallState, config: RunnableConfig) -> Dict:
+    """
+    This node now primarily serves the web search path for iterative refinement.
+    """
+    main_logger.info("Starting reflection on gathered research")
+    
+    try:
+        configurable = Configuration.from_runnable_config(config)
+        research_results = state["web_research_result"]
+        
+        main_logger.info(f"Reflecting on {len(research_results)} research results")
+        main_logger.info(f"Using reflection model: {configurable.reflection_model}")
+        
+        formatted_prompt = reflection_instructions.format(
+            current_date=get_current_date(),
+            research_topic=get_research_topic(state["messages"]),
+            summaries="\n\n---\n\n".join(research_results),
+        )
+        
+        main_logger.debug(f"Reflection prompt length: {len(formatted_prompt)} characters")
+        
+        llm = ChatGoogleGenerativeAI(
+            model=configurable.reflection_model, temperature=1.0, max_retries=2, api_key=gemini_api_key
+        )
+        result = llm.with_structured_output(Reflection).invoke(formatted_prompt)
+        
+        main_logger.info(f"Reflection completed. Is sufficient: {result.is_sufficient}")
+        if result.follow_up_queries:
+            main_logger.info(f"Generated {len(result.follow_up_queries)} follow-up queries: {result.follow_up_queries}")
+        
+        return {
+            "is_sufficient": result.is_sufficient,
+            "search_query": result.follow_up_queries,
+        }
+    
+    except Exception as e:
+        main_logger.error(f"Error in reflection: {str(e)}")
+        raise
+
+@log_execution_time
+def evaluate_research(state: OverallState, config: RunnableConfig) -> str:
+    """
+    Routing function. For internal KB, it always finalizes. For web search, it iterates.
+    """
+    main_logger.info("Evaluating research completeness")
+    
+    try:
+        configurable = Configuration.from_runnable_config(config)
+        
+        # If we used the internal KB, we go straight to the answer.
+        if not configurable.use_web_search:
+            main_logger.info("Internal KB path - proceeding to finalize answer")
             return "finalize_answer"
 
+        # For web search, check for iteration
+        max_loops = configurable.max_research_loops
+        current_loop = state.get("research_loop_count", 0)
+        is_sufficient = state.get("is_sufficient", False)
+        
+        main_logger.info(f"Web search evaluation - Loop: {current_loop}/{max_loops}, Sufficient: {is_sufficient}")
+        
+        if is_sufficient or current_loop >= max_loops:
+            main_logger.info("Research complete - proceeding to finalize answer")
+            return "finalize_answer"
+        else:
+            main_logger.info("Research needs more iteration - continuing web search")
+            return "perform_web_search"
+    
+    except Exception as e:
+        main_logger.error(f"Error in evaluate_research: {str(e)}")
+        raise
 
-def finalize_answer(state: OverallState, config: RunnableConfig):
-    """LangGraph node that finalizes the research summary."""
-    configurable = Configuration.from_runnable_config(config)
-    reasoning_model = configurable.answer_model # Use model from config
+@log_state_changes
+@log_execution_time
+def finalize_answer(state: OverallState, config: RunnableConfig) -> Dict:
+    """
+    This node's logic remains the same. It generates the final answer based on the
+    content gathered in the 'web_research_result' field, which is populated
+    by both the web search and the KB retrieval paths.
+    """
+    main_logger.info("Finalizing answer based on gathered research")
+    
+    try:
+        configurable = Configuration.from_runnable_config(config)
+        reasoning_model = configurable.answer_model
+        current_date = get_current_date()
+        research_results = state["web_research_result"]
+        
+        main_logger.info(f"Using reasoning model: {reasoning_model}")
+        main_logger.info(f"Finalizing answer based on {len(research_results)} research results")
+        
+        formatted_prompt = answer_instructions.format(
+            current_date=current_date,
+            research_topic=get_research_topic(state["messages"]),
+            summaries="\n---\n\n".join(research_results),
+        )
+        
+        main_logger.debug(f"Answer prompt length: {len(formatted_prompt)} characters")
+        
+        llm = ChatGoogleGenerativeAI(
+            model=reasoning_model, temperature=0, max_retries=2, api_key=gemini_api_key
+        )
+        result = llm.invoke(formatted_prompt)
+        
+        main_logger.info(f"Generated answer length: {len(result.content)} characters")
+        
+        unique_sources = []
+        if configurable.use_web_search and state.get("sources_gathered"):
+            original_sources = len(state["sources_gathered"])
+            main_logger.info(f"Processing {original_sources} sources for citation replacement")
+            
+            for source in state["sources_gathered"]:
+                if "short_url" in source and source["short_url"] in result.content:
+                    result.content = result.content.replace(source["short_url"], source["value"])
+                    unique_sources.append(source)
+            
+            main_logger.info(f"Processed citations: {len(unique_sources)} unique sources used")
+        
+        main_logger.info("Answer finalization completed successfully")
+        return {"messages": [AIMessage(content=result.content)], "sources_gathered": unique_sources}
+    
+    except Exception as e:
+        main_logger.error(f"Error in finalize_answer: {str(e)}")
+        raise
 
-    current_date = get_current_date()
-    formatted_prompt = answer_instructions.format(
-        current_date=current_date,
-        research_topic=get_research_topic(state["messages"]),
-        summaries="\n---\n\n".join(state["web_research_result"]),
-    )
+# =========================================================================
+# GRAPH CONSTRUCTION
+# =========================================================================
 
-    llm = ChatGoogleGenerativeAI(
-        model=reasoning_model,
-        temperature=0,
-        max_retries=2,
-        api_key=os.getenv("GEMINI_API_KEY"),
-    )
-    result = llm.invoke(formatted_prompt)
+main_logger.info("Constructing research agent graph")
 
-    unique_sources = []
-    # Only process web citations if web search was enabled AND sources were gathered
-    if configurable.use_web_search and state.get("sources_gathered"):
-        for source in state["sources_gathered"]:
-            # Check if source['short_url'] exists before replacement for robustness
-            if "short_url" in source and source["short_url"] in result.content:
-                result.content = result.content.replace(
-                    source["short_url"], source["value"]
-                )
-                unique_sources.append(source)
-    else:
-        # For internal KB, sources_gathered is empty, no special handling needed here.
-        # The prompt handles internal KB references without formal citations.
-        pass
-
-    return {
-        "messages": [AIMessage(content=result.content)],
-        "sources_gathered": unique_sources,
-    }
-
-
-# Update the OverallState definition in state.py
-# If you haven't done this already, update backend/src/agent/state.py
-# by adding 'chosen_kb_topic: Optional[str]' to OverallState.
-# (If you followed the previous step to add this, you can skip this comment block,
-# but it's crucial for the state to correctly propagate the chosen topic).
-
-# Create our Agent Graph
+# Define the new graph structure
 builder = StateGraph(OverallState, config_schema=Configuration)
 
-# Define the nodes we will cycle between
-# NEW: Initial node to determine the path (web search vs. internal KB)
-builder.add_node("determine_tool_and_initial_action", determine_tool_and_initial_action)
-builder.add_node("research_step", research_step)
+# Add nodes
+builder.add_node("route_initial_query", route_initial_query)
+builder.add_node("generate_web_queries", generate_web_queries)
+builder.add_node("perform_web_search", perform_web_search)
+builder.add_node("search_kb_index", search_kb_index)
+builder.add_node("retrieve_kb_content", retrieve_kb_content)
 builder.add_node("reflection", reflection)
 builder.add_node("finalize_answer", finalize_answer)
 
-# Set the entrypoint as `determine_tool_and_initial_action`
-builder.add_edge(START, "determine_tool_and_initial_action")
+main_logger.info("Added all nodes to graph")
 
-# Conditional routing AFTER determine_tool_and_initial_action
-# If use_web_search is True, proceed to research_step immediately.
-# If use_web_search is False, research_step will internally handle KB topic.
-builder.add_edge("determine_tool_and_initial_action", "research_step")
+# Define the edges
+builder.set_entry_point("route_initial_query")
 
+# Conditional routing from the entry point
+builder.add_conditional_edges(
+    "route_initial_query",
+    lambda x: x["next_node"],
+    {
+        "generate_web_queries": "generate_web_queries",
+        "search_kb_index": "search_kb_index",
+    }
+)
 
-# Reflect on the research (same for both paths)
-builder.add_edge("research_step", "reflection")
+# Web Search Path
+builder.add_edge("generate_web_queries", "perform_web_search")
+builder.add_edge("perform_web_search", "reflection")
 
-# Evaluate the research and decide next step
+# Internal KB Path
+builder.add_edge("search_kb_index", "retrieve_kb_content")
+builder.add_edge("retrieve_kb_content", "finalize_answer")
+
+# Conditional edge from reflection (for web search iteration)
 builder.add_conditional_edges(
     "reflection",
     evaluate_research,
     {
-        "research_step": "research_step", # For web search, go back to research_step with follow-up queries
-        "finalize_answer": "finalize_answer" # For KB or if sufficient, finalize
+        "perform_web_search": "perform_web_search",
+        "finalize_answer": "finalize_answer"
     }
 )
 
-# Finalize the answer
+# Final step
 builder.add_edge("finalize_answer", END)
 
+main_logger.info("Graph edges configured successfully")
+
 graph = builder.compile(name="pro-search-agent")
+main_logger.info("Research agent graph compiled successfully")
+
+# Log graph structure for debugging
+main_logger.info("Graph structure:")
+main_logger.info(f"Nodes: {list(graph.nodes.keys())}")
+main_logger.info("Research agent initialization complete")

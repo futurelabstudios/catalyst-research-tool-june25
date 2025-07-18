@@ -44,6 +44,13 @@ class Configuration(BaseModel):
         metadata={"description": "Whether to enable web search (True) or use the internal knowledge base (False) by default."},
     )
 
+    index_search_model: str = Field(
+        default="gemini-2.5-flash",
+        metadata={
+            "description": "The name of the language model to use for searching the internal KB index."
+        },
+    )
+
     @classmethod
     def from_runnable_config(
         cls, config: Optional[RunnableConfig] = None
