@@ -1,3 +1,5 @@
+import asyncio
+import inspect
 import os
 import logging
 import time
@@ -90,8 +92,18 @@ def log_state_changes(func):
         try:
             result = func(state, config, *args, **kwargs)
             
-            # Log output state changes
-            if result:
+            # Check if result is an async generator
+            if inspect.isasyncgen(result):
+                state_logger.info(f"[{func_name}] Returning async generator (streaming function)")
+                return result
+            
+            # Check if result is a regular generator
+            if inspect.isgenerator(result):
+                state_logger.info(f"[{func_name}] Returning generator (streaming function)")
+                return result
+            
+            # Log output state changes for regular dict returns
+            if result and hasattr(result, 'keys'):
                 state_logger.info(f"[{func_name}] Output state changes: {list(result.keys())}")
                 for key, value in result.items():
                     if key == 'messages':
@@ -104,6 +116,10 @@ def log_state_changes(func):
                         state_logger.info(f"[{func_name}] Found {len(value)} relevant files: {value}")
                     else:
                         state_logger.debug(f"[{func_name}] {key}: {value}")
+            elif result is None:
+                state_logger.info(f"[{func_name}] No state changes returned")
+            else:
+                state_logger.info(f"[{func_name}] Returned non-dict result: {type(result)}")
             
             return result
         except Exception as e:
@@ -356,45 +372,62 @@ def search_kb_index(state: OverallState, config: RunnableConfig) -> Dict:
         kb_logger.error(f"Error in search_kb_index: {str(e)}")
         raise
 
+
 @log_state_changes
 @log_execution_time
-def retrieve_kb_content(state: OverallState, config: RunnableConfig) -> Dict:
+async def retrieve_kb_content(state: OverallState, config: RunnableConfig) -> Dict:
     """
-    Consumes the generator from the KB tool to stream progress and retrieve content.
+    Node that retrieves content from KB files and collects all activity updates.
     """
     file_paths = state.get("relevant_file_paths", [])
-    kb_logger.info(f"Retrieving content for {len(file_paths)} files via generator.")
-    
+    kb_logger.info(f"Retrieving content for {len(file_paths)} files.")
+
     if not file_paths:
         kb_logger.warning("No relevant file paths provided for content retrieval.")
         return {"web_research_result": []}
 
+    all_content_chunks = []
+    all_activities = []
+    
     try:
-        all_activities = []
-        all_content_chunks = []
-
-        # Consume the generator from the tool
+        # Get the generator from the tool
         tool_generator = internal_kb_tool_instance.stream_content_by_paths(file_paths)
         
+        # Loop through the generator and collect all updates
         for progress_update in tool_generator:
-            # Collect each activity update
-            all_activities.append(progress_update.activity)
-            # Collect each piece of content
+            # Collect the activity update
+            if progress_update.activity:
+                all_activities.append(progress_update.activity)
+
+            # Collect the content chunk
             if progress_update.content_chunk:
                 all_content_chunks.append(progress_update.content_chunk)
+            
+            # Give the event loop a chance to process
+            await asyncio.sleep(0.01)
 
-        # Join all the content chunks together for the final answer
+        # After the loop is done, prepare the final content
         final_content = "\n".join(all_content_chunks)
-        kb_logger.info(f"Generator finished. Total content length: {len(final_content)} characters.")
+        kb_logger.info(f"Content retrieval finished. Total content length: {len(final_content)} characters.")
 
+        # Return all collected data as a single state update
         return {
             "web_research_result": [final_content] if final_content else [],
             "activity_feed": all_activities
         }
     
     except Exception as e:
-        kb_logger.error(f"Error in retrieve_kb_content while consuming generator: {str(e)}")
+        kb_logger.error(f"Error in retrieve_kb_content: {str(e)}")
+        error_activity = create_activity(
+            "retrieve_content", "Research", "Content Retrieval Failed",
+            str(e), "error", "error"
+        )
+        return {
+            "web_research_result": [f"Error during retrieval: {e}"],
+            "activity_feed": [error_activity]
+        }
         raise
+
 
 # --- Shared Nodes ---
 @log_state_changes
@@ -547,7 +580,7 @@ builder.add_node("route_initial_query", route_initial_query)
 builder.add_node("generate_web_queries", generate_web_queries)
 builder.add_node("perform_web_search", perform_web_search)
 builder.add_node("search_kb_index", search_kb_index)
-builder.add_node("retrieve_kb_content", retrieve_kb_content)
+builder.add_node(retrieve_kb_content)
 builder.add_node("reflection", reflection)
 builder.add_node("finalize_answer", finalize_answer)
 
