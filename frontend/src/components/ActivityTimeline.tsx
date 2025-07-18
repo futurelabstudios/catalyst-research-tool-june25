@@ -224,7 +224,7 @@ export function ActivityTimeline({
                     </div>
                     <div>
                       <p className="text-sm text-neutral-300 font-medium">
-                        Processing...
+                        Thinking...
                       </p>
                     </div>
                   </div>
