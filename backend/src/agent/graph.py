@@ -375,7 +375,7 @@ def search_kb_index(state: OverallState, config: RunnableConfig) -> Dict:
 
 @log_state_changes
 @log_execution_time
-async def retrieve_kb_content(state: OverallState, config: RunnableConfig) -> Dict:
+def retrieve_kb_content(state: OverallState, config: RunnableConfig) -> Dict:
     """
     Node that retrieves content from KB files and collects all activity updates.
     """
@@ -403,8 +403,7 @@ async def retrieve_kb_content(state: OverallState, config: RunnableConfig) -> Di
             if progress_update.content_chunk:
                 all_content_chunks.append(progress_update.content_chunk)
             
-            # Give the event loop a chance to process
-            await asyncio.sleep(0.01)
+            # No need for asyncio.sleep in a synchronous function
 
         # After the loop is done, prepare the final content
         final_content = "\n".join(all_content_chunks)
@@ -426,7 +425,6 @@ async def retrieve_kb_content(state: OverallState, config: RunnableConfig) -> Di
             "web_research_result": [f"Error during retrieval: {e}"],
             "activity_feed": [error_activity]
         }
-        raise
 
 
 # --- Shared Nodes ---
@@ -580,7 +578,7 @@ builder.add_node("route_initial_query", route_initial_query)
 builder.add_node("generate_web_queries", generate_web_queries)
 builder.add_node("perform_web_search", perform_web_search)
 builder.add_node("search_kb_index", search_kb_index)
-builder.add_node(retrieve_kb_content)
+builder.add_node("retrieve_kb_content", retrieve_kb_content)
 builder.add_node("reflection", reflection)
 builder.add_node("finalize_answer", finalize_answer)
 
