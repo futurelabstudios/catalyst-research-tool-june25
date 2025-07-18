@@ -75,7 +75,7 @@ class SurgicalKBTool:
     """
     
     @log_performance
-    def __init__(self, kb_file_path: Optional[str] = None, max_content_size: int = 1024 * 1024):
+    def __init__(self, kb_file_path: Optional[str] = None, max_content_size: int = 2400000):
         """
         Initialize the SurgicalKBTool.
         
