@@ -432,6 +432,7 @@ def perform_web_search(state: OverallState, config: RunnableConfig) -> Dict:
 def search_kb_index(state: OverallState, config: RunnableConfig) -> Dict:
     """
     Node for the internal KB path. Searches the KB index to find relevant file paths.
+    If no relevant files are found, proceeds directly to answer generation using LLM knowledge.
     """
     kb_logger.info("Searching KB index for relevant files")
 
@@ -473,14 +474,31 @@ def search_kb_index(state: OverallState, config: RunnableConfig) -> Dict:
         result = structured_llm.invoke(formatted_prompt)
         
         if not result.file_paths:
-            kb_logger.warning("No relevant files found in KB index")
-            activity_end = create_activity(
-                "search_index", "Research", "No relevant documents found", 
-                "Knowledge base search completed with no matches", "completed", "alert-circle"
+            kb_logger.warning("No relevant files found in KB index - proceeding to answer from LLM knowledge")
+            
+            # Index analysis complete (no matches)
+            index_complete = create_activity(
+                "index_analysis", "Analysis", "No relevant documents found", 
+                "Knowledge base contains no matching documents", "completed", "alert-circle"
             )
+            
+            # Fallback to LLM knowledge activity
+            fallback_activity = create_activity(
+                "llm_fallback", "Analysis", "Using general knowledge...", 
+                "Answering from trained knowledge base", "in_progress", "brain"
+            )
+            
+            activity_end = create_activity(
+                "search_index", "Research", "Proceeding with general knowledge", 
+                "No specific documents found - using LLM training data", "completed", "brain"
+            )
+            
+            # Set empty research result to trigger direct answer generation
+            # This will cause retrieve_kb_content to be skipped and go straight to finalize_answer
             return {
-                "messages": [AIMessage(content="I couldn't find any relevant documents in the knowledge base for your query.")], 
-                "activity_feed": [activity_start, index_activity, activity_end]
+                "relevant_file_paths": [],  # Empty list
+                "web_research_result": [],  # Empty list - will be handled in finalize_answer
+                "activity_feed": [activity_start, index_activity, index_complete, fallback_activity, activity_end]
             }
 
         kb_logger.info(f"Found {len(result.file_paths)} relevant files: {result.file_paths}")
@@ -515,13 +533,24 @@ def search_kb_index(state: OverallState, config: RunnableConfig) -> Dict:
 def retrieve_kb_content(state: OverallState, config: RunnableConfig) -> Dict:
     """
     Node that retrieves content from KB files and collects all activity updates.
+    If no file paths are provided, skips content retrieval (fallback to LLM knowledge).
     """
     file_paths = state.get("relevant_file_paths", [])
     kb_logger.info(f"Retrieving content for {len(file_paths)} files.")
 
     if not file_paths:
-        kb_logger.warning("No relevant file paths provided for content retrieval.")
-        return {"web_research_result": []}
+        kb_logger.info("No relevant file paths provided - skipping content retrieval for LLM fallback")
+        
+        # Create activity to indicate we're skipping KB retrieval
+        skip_activity = create_activity(
+            "skip_retrieval", "Analysis", "Skipping document retrieval", 
+            "No relevant documents found - will use general knowledge", "completed", "brain"
+        )
+        
+        return {
+            "web_research_result": [],  # Empty - will trigger LLM knowledge fallback
+            "activity_feed": [skip_activity]
+        }
 
     all_content_chunks = []
     all_activities = []
@@ -666,9 +695,9 @@ def evaluate_research(state: OverallState, config: RunnableConfig) -> str:
 @log_execution_time
 def finalize_answer(state: OverallState, config: RunnableConfig) -> Dict:
     """
-    This node's logic remains the same. It generates the final answer based on the
-    content gathered in the 'web_research_result' field, which is populated
-    by both the web search and the KB retrieval paths.
+    This node generates the final answer based on the content gathered in the 
+    'web_research_result' field. If no research content is available, it answers
+    from the LLM's own knowledge.
     """
     main_logger.info("Finalizing answer based on gathered research")
     
@@ -677,7 +706,7 @@ def finalize_answer(state: OverallState, config: RunnableConfig) -> Dict:
     # Synthesis start activity
     synthesis_start = create_activity(
         "synthesize", "Synthesis", "Composing final answer...", 
-        "Combining insights from multiple sources", "in_progress", "brain"
+        "Preparing comprehensive response", "in_progress", "brain"
     )
     activities.append(synthesis_start)
     
@@ -685,23 +714,50 @@ def finalize_answer(state: OverallState, config: RunnableConfig) -> Dict:
         configurable = debug_configuration(config, "finalize_answer")
         reasoning_model = configurable.answer_model
         current_date = get_current_date()
-        research_results = state["web_research_result"]
+        research_results = state.get("web_research_result", [])
         
-        main_logger.info(f"Using modelto finalize answer: {reasoning_model}")
+        main_logger.info(f"Using model to finalize answer: {reasoning_model}")
         main_logger.info(f"Finalizing answer based on {len(research_results)} research results")
         
-        # Information synthesis activity
-        info_synthesis = create_activity(
-            "information_synthesis", "Synthesis", "Synthesizing information...", 
-            f"Combining insights from {len(research_results)} sources", "in_progress", "brain"
-        )
-        activities.append(info_synthesis)
+        # Check if we have research content or need to use LLM knowledge
+        has_research_content = bool(research_results and any(result.strip() for result in research_results))
         
-        formatted_prompt = answer_instructions.format(
-            current_date=current_date,
-            research_topic=get_research_topic(state["messages"]),
-            summaries="\n---\n\n".join(research_results),
-        )
+        if has_research_content:
+            # Information synthesis activity (with research content)
+            info_synthesis = create_activity(
+                "information_synthesis", "Synthesis", "Synthesizing research information...", 
+                f"Combining insights from {len(research_results)} sources", "in_progress", "brain"
+            )
+            activities.append(info_synthesis)
+            
+            formatted_prompt = answer_instructions.format(
+                current_date=current_date,
+                research_topic=get_research_topic(state["messages"]),
+                summaries="\n---\n\n".join(research_results),
+            )
+            
+            main_logger.info("Using research-based answer generation")
+            
+        else:
+            # LLM knowledge synthesis activity (fallback)
+            info_synthesis = create_activity(
+                "llm_knowledge_synthesis", "Synthesis", "Drawing from general knowledge...", 
+                "Generating answer from trained knowledge base", "in_progress", "brain"
+            )
+            activities.append(info_synthesis)
+            
+            # Modified prompt for LLM-only knowledge
+            user_query = get_research_topic(state["messages"])
+            formatted_prompt = f"""You are a knowledgeable research assistant. Please provide a comprehensive and accurate answer to the following question based on your training data and general knowledge.
+
+Current date: {current_date}
+Research topic: {user_query}
+
+Please provide a detailed, well-structured answer that addresses the user's question thoroughly. Use your general knowledge and training data to provide accurate information. If there are any limitations to your knowledge or if the information might be outdated, please mention this appropriately.
+
+Answer:"""
+            
+            main_logger.info("Using LLM knowledge fallback for answer generation")
         
         main_logger.debug(f"Answer prompt length: {len(formatted_prompt)} characters")
         
@@ -713,10 +769,16 @@ def finalize_answer(state: OverallState, config: RunnableConfig) -> Dict:
         main_logger.info(f"Generated answer length: {len(result.content)} characters")
         
         # Information synthesis complete
-        info_complete = create_activity(
-            "information_synthesis", "Synthesis", "Information synthesis complete", 
-            f"Successfully combined insights from all sources", "completed", "done"
-        )
+        if has_research_content:
+            info_complete = create_activity(
+                "information_synthesis", "Synthesis", "Research synthesis complete", 
+                f"Successfully combined insights from research sources", "completed", "done"
+            )
+        else:
+            info_complete = create_activity(
+                "llm_knowledge_synthesis", "Synthesis", "Knowledge synthesis complete", 
+                f"Answer generated from general knowledge", "completed", "done"
+            )
         activities.append(info_complete)
         
         unique_sources = []
@@ -762,9 +824,10 @@ def finalize_answer(state: OverallState, config: RunnableConfig) -> Dict:
         main_logger.info("Answer finalization completed successfully")
         
         # Final synthesis activity
+        answer_source = "research-based" if has_research_content else "knowledge-based"
         synthesis_end = create_activity(
             "synthesize", "Synthesis", "Answer composed", 
-            f"Final answer prepared ({len(result.content)} characters)", "completed", "done"
+            f"Final {answer_source} answer prepared ({len(result.content)} characters)", "completed", "done"
         )
         activities.append(synthesis_end)
         
