@@ -20,9 +20,11 @@ class Activity(BaseModel):
 def create_activity(id, phase, title, details, status, icon=None, progress=None):
     return Activity(
         id=id, phase=phase, title=title, details=details,
-        status=status, icon=icon, progress=progress
+        status=status,
+        timestamp=datetime.now(timezone.utc),
+        icon=icon,
+        progress=progress
     )
-
 @dataclass
 class RetrievalProgress:
     """A data structure to hold a single update from the retrieval generator."""

@@ -127,7 +127,6 @@ export function ActivityTimeline({
     }
   };
 
-  // Enhanced details formatting
   const formatDetails = (activity: Activity) => {
     if (!activity.details) return null;
 
@@ -137,10 +136,11 @@ export function ActivityTimeline({
       activity.details.includes("out of")
     ) {
       const match = activity.details.match(
-        /Successfully read content for (\d+) out of (\d+) files\. Failed: (\d+)\. Errors: (\d+)\./
+        /Successfully read content for (\d+) out of (\d+) files\.(?: Failed: (\d+)\.)?(?: Errors: (\d+)\.)?/
       );
+
       if (match) {
-        const [, successful, total, failed, errors] = match;
+        const [, successful, total, failed = "0", errors = "0"] = match;
         const truncated =
           parseInt(total) - parseInt(successful) - parseInt(failed);
 
