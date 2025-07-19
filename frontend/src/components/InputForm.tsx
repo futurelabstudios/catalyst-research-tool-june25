@@ -1,15 +1,6 @@
-// frontend/src/components/InputForm.tsx
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import {
-  SquarePen,
-  Brain,
-  Send,
-  StopCircle,
-  Zap,
-  Cpu,
-  Globe,
-} from "lucide-react"; // Added Globe icon
+import { SquarePen, Send, StopCircle, Globe, Gauge } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
@@ -19,13 +10,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-// Updated InputFormProps
+// Updated InputFormProps with simplified signature
 interface InputFormProps {
   onSubmit: (
     inputValue: string,
-    effort: string,
-    model: string,
-    useWebSearch: boolean // New parameter
+    mode: string, // Changed from effort and model
+    useWebSearch: boolean
   ) => void;
   onCancel: () => void;
   isLoading: boolean;
@@ -39,14 +29,13 @@ export const InputForm: React.FC<InputFormProps> = ({
   hasHistory,
 }) => {
   const [internalInputValue, setInternalInputValue] = useState("");
-  const [effort, setEffort] = useState("medium");
-  const [model, setModel] = useState("gemini-2.5-flash-preview-04-17");
-  const [useWebSearch, setUseWebSearch] = useState(false); // NEW: State for web search toggle, default to false (internal KB)
+  const [mode, setMode] = useState("fast");
+  const [useWebSearch, setUseWebSearch] = useState(false);
 
   const handleInternalSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!internalInputValue.trim()) return;
-    onSubmit(internalInputValue, effort, model, useWebSearch); // Pass useWebSearch
+    onSubmit(internalInputValue, mode, useWebSearch); // Pass mode
     setInternalInputValue("");
   };
 
@@ -82,7 +71,6 @@ export const InputForm: React.FC<InputFormProps> = ({
         />
         <div className="flex-shrink-0 -mt-3">
           {" "}
-          {/* Added flex-shrink-0 */}
           {isLoading ? (
             <Button
               type="button"
@@ -112,40 +100,33 @@ export const InputForm: React.FC<InputFormProps> = ({
       </div>
       <div className="flex items-center justify-between">
         <div className="flex flex-row gap-2 flex-wrap">
-          {" "}
-          {/* Added flex-wrap for responsiveness */}
-          <div className="flex flex-row gap-2 bg-neutral-700 border-neutral-600 text-neutral-300 focus:ring-neutral-500 rounded-xl rounded-t-sm pl-2  max-w-[100%] sm:max-w-[90%]">
+          {/* <div className="flex flex-row gap-2 bg-neutral-700 border-neutral-600 text-neutral-300 focus:ring-neutral-500 rounded-xl rounded-t-sm pl-2 max-w-[100%] sm:max-w-[90%]">
             <div className="flex flex-row items-center text-sm">
-              <Brain className="h-4 w-4 mr-2" />
-              Effort
+              <Gauge className="h-4 w-4 mr-2" />
+              Mode
             </div>
-            <Select value={effort} onValueChange={setEffort}>
+            <Select value={mode} onValueChange={setMode}>
               <SelectTrigger className="w-[120px] bg-transparent border-none cursor-pointer">
-                <SelectValue placeholder="Effort" />
+                <SelectValue placeholder="Mode" />
               </SelectTrigger>
               <SelectContent className="bg-neutral-700 border-neutral-600 text-neutral-300 cursor-pointer">
                 <SelectItem
-                  value="low"
+                  value="fast"
                   className="hover:bg-neutral-600 focus:bg-neutral-600 cursor-pointer"
                 >
-                  Low
+                  Fast
                 </SelectItem>
                 <SelectItem
-                  value="medium"
+                  value="quality"
                   className="hover:bg-neutral-600 focus:bg-neutral-600 cursor-pointer"
                 >
-                  Medium
-                </SelectItem>
-                <SelectItem
-                  value="high"
-                  className="hover:bg-neutral-600 focus:bg-neutral-600 cursor-pointer"
-                >
-                  High
+                  Thorough
                 </SelectItem>
               </SelectContent>
             </Select>
-          </div>
-          {/* NEW: Tools Dropdown */}
+          </div> */}
+
+          {/* Tools Dropdown */}
           <div className="flex flex-row gap-2 bg-neutral-700 border-neutral-600 text-neutral-300 focus:ring-neutral-500 rounded-xl rounded-t-sm pl-2 max-w-[100%] sm:max-w-[90%]">
             <div className="flex flex-row items-center text-sm ml-2">
               <Globe className="h-4 w-4 mr-2" />
@@ -170,44 +151,6 @@ export const InputForm: React.FC<InputFormProps> = ({
                   className="hover:bg-neutral-600 focus:bg-neutral-600 cursor-pointer"
                 >
                   Web Search
-                </SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          {/* End NEW: Tools Dropdown */}
-          <div className="flex flex-row gap-2 bg-neutral-700 border-neutral-600 text-neutral-300 focus:ring-neutral-500 rounded-xl rounded-t-sm pl-2  max-w-[100%] sm:max-w-[90%]">
-            <div className="flex flex-row items-center text-sm ml-2">
-              <Cpu className="h-4 w-4 mr-2" />
-              Model
-            </div>
-            <Select value={model} onValueChange={setModel}>
-              <SelectTrigger className="w-[150px] bg-transparent border-none cursor-pointer">
-                <SelectValue placeholder="Model" />
-              </SelectTrigger>
-              <SelectContent className="bg-neutral-700 border-neutral-600 text-neutral-300 cursor-pointer">
-                <SelectItem
-                  value="gemini-2.0-flash"
-                  className="hover:bg-neutral-600 focus:bg-neutral-600 cursor-pointer"
-                >
-                  <div className="flex items-center">
-                    <Zap className="h-4 w-4 mr-2 text-yellow-400" /> 2.0 Flash
-                  </div>
-                </SelectItem>
-                <SelectItem
-                  value="gemini-2.5-flash-preview-04-17"
-                  className="hover:bg-neutral-600 focus:bg-neutral-600 cursor-pointer"
-                >
-                  <div className="flex items-center">
-                    <Zap className="h-4 w-4 mr-2 text-orange-400" /> 2.5 Flash
-                  </div>
-                </SelectItem>
-                <SelectItem
-                  value="gemini-2.5-pro-preview-05-06"
-                  className="hover:bg-neutral-600 focus:bg-neutral-600 cursor-pointer"
-                >
-                  <div className="flex items-center">
-                    <Cpu className="h-4 w-4 mr-2 text-purple-400" /> 2.5 Pro
-                  </div>
                 </SelectItem>
               </SelectContent>
             </Select>

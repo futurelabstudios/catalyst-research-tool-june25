@@ -17,9 +17,12 @@ export default function App() {
     messages: Message[];
     initial_search_query_count: number;
     max_research_loops: number;
-    reasoning_model: string;
+    index_search_model: string;
+    answer_model: string;
+    reflection_model: string;
+    query_generator_model: string;
     use_web_search: boolean;
-    activity_feed?: Activity[]; // New: expecting structured activities from backend
+    activity_feed?: Activity[];
   }>({
     apiUrl: import.meta.env.DEV
       ? "http://localhost:2024"
@@ -106,31 +109,30 @@ export default function App() {
   const handleSubmit = useCallback(
     (
       submittedInputValue: string,
-      effort: string,
-      model: string,
+      mode: string, // Updated parameter
       useWebSearch: boolean
     ) => {
       if (!submittedInputValue.trim()) return;
 
-      // Clear current activities for new request
       setCurrentActivities([]);
       hasFinalizeEventOccurredRef.current = false;
 
-      let initial_search_query_count = 0;
-      let max_research_loops = 0;
-      switch (effort) {
-        case "low":
-          initial_search_query_count = 1;
-          max_research_loops = 1;
-          break;
-        case "medium":
-          initial_search_query_count = 3;
-          max_research_loops = 3;
-          break;
-        case "high":
-          initial_search_query_count = 5;
-          max_research_loops = 10;
-          break;
+      // Define models based on the selected mode
+      let index_search_model = "";
+      let answer_model = "";
+      let reflection_model = "";
+      let query_generator_model = "";
+
+      if (mode === "fast") {
+        index_search_model = "gemini-2.5-flash-lite-preview-06-17";
+        answer_model = "gemini-2.5-flash-lite-preview-06-17";
+        reflection_model = "gemini-2.5-flash-lite-preview-06-17";
+        query_generator_model = "gemini-2.5-flash-lite-preview-06-17";
+      } else {
+        index_search_model = "gemini-2.5-flash";
+        answer_model = "gemini-2.5-flash";
+        reflection_model = "gemini-2.5-flash";
+        query_generator_model = "gemini-2.5-flash";
       }
 
       const newMessages: Message[] = [
@@ -142,23 +144,25 @@ export default function App() {
         },
       ];
 
+      // Submit with the new dynamic configuration
       thread.submit({
         messages: newMessages,
-        initial_search_query_count: initial_search_query_count,
-        max_research_loops: max_research_loops,
-        reasoning_model: model,
+        initial_search_query_count: 3,
+        max_research_loops: 3,
+        index_search_model,
+        answer_model,
+        reflection_model,
+        query_generator_model,
         use_web_search: useWebSearch,
       });
     },
     [thread]
   );
-
   const handleCancel = useCallback(() => {
     thread.stop();
     window.location.reload();
   }, [thread]);
 
-  // NEW: Retry function for failed activities
   const handleRetryActivity = useCallback((activityId: string) => {
     setCurrentActivities((prevActivities) =>
       prevActivities.map((activity) =>
@@ -167,8 +171,6 @@ export default function App() {
           : activity
       )
     );
-    // Here you would typically send a retry request to the backend
-    // For now, we'll just update the UI state
   }, []);
 
   return (
@@ -192,7 +194,6 @@ export default function App() {
               scrollAreaRef={scrollAreaRef}
               onSubmit={handleSubmit}
               onCancel={handleCancel}
-              // NEW: Pass structured activities instead of simple events
               liveActivities={currentActivities}
               historicalActivities={historicalActivities}
               onRetryActivity={handleRetryActivity}

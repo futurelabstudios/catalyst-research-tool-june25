@@ -226,16 +226,11 @@ interface ChatMessagesViewProps {
   messages: Message[];
   isLoading: boolean;
   scrollAreaRef: React.RefObject<HTMLDivElement | null>;
-  onSubmit: (
-    inputValue: string,
-    effort: string,
-    model: string,
-    useWebSearch: boolean
-  ) => void;
+  onSubmit: (inputValue: string, mode: string, useWebSearch: boolean) => void;
   onCancel: () => void;
-  liveActivities: Activity[]; // UPDATED: Changed from liveActivityEvents
-  historicalActivities: Record<string, Activity[]>; // UPDATED: Changed from ProcessedEvent[]
-  onRetryActivity?: (activityId: string) => void; // NEW: Added retry prop
+  liveActivities: Activity[];
+  historicalActivities: Record<string, Activity[]>;
+  onRetryActivity?: (activityId: string) => void;
 }
 
 export function ChatMessagesView({
@@ -244,9 +239,9 @@ export function ChatMessagesView({
   scrollAreaRef,
   onSubmit,
   onCancel,
-  liveActivities, // UPDATED: Updated prop name
+  liveActivities,
   historicalActivities,
-  onRetryActivity, // NEW: Added retry prop
+  onRetryActivity,
 }: ChatMessagesViewProps) {
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
 
@@ -254,7 +249,7 @@ export function ChatMessagesView({
     try {
       await navigator.clipboard.writeText(text);
       setCopiedMessageId(messageId);
-      setTimeout(() => setCopiedMessageId(null), 2000); // Reset after 2 seconds
+      setTimeout(() => setCopiedMessageId(null), 2000);
     } catch (err) {
       console.error("Failed to copy text: ", err);
     }
@@ -282,13 +277,13 @@ export function ChatMessagesView({
                     <AiMessageBubble
                       message={message}
                       historicalActivity={historicalActivities[message.id!]}
-                      liveActivity={liveActivities} // UPDATED: Pass live activities
+                      liveActivity={liveActivities}
                       isLastMessage={isLast}
-                      isOverallLoading={isLoading} // Pass global loading state
+                      isOverallLoading={isLoading}
                       mdComponents={mdComponents}
                       handleCopy={handleCopy}
                       copiedMessageId={copiedMessageId}
-                      onRetryActivity={onRetryActivity} // NEW: Pass retry handler
+                      onRetryActivity={onRetryActivity}
                     />
                   )}
                 </div>

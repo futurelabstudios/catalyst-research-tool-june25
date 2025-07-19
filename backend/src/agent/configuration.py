@@ -23,7 +23,7 @@ class Configuration(BaseModel):
     )
 
     answer_model: str = Field(
-        default="gemini-2.5-flash",
+        default="gemini-2.5-flash-lite-preview-06-17",
         metadata={
             "description": "The name of the language model to use for the agent's answer."
         },
@@ -45,7 +45,7 @@ class Configuration(BaseModel):
     )
 
     index_search_model: str = Field(
-        default="gemini-2.5-flash",
+        default="gemini-2.5-flash-lite-preview-06-17",
         metadata={
             "description": "The name of the language model to use for searching the internal KB index."
         },

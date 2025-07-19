@@ -53,6 +53,25 @@ kb_logger = logging.getLogger('research_agent.kb')
 performance_logger = logging.getLogger('research_agent.performance')
 state_logger = logging.getLogger('research_agent.state')
 
+def debug_configuration(config: RunnableConfig, node_name: str = ""):
+    """Debug function to check configuration values"""
+    try:
+        configurable = Configuration.from_runnable_config(config)
+        main_logger.info(f"[{node_name}] Configuration debug:")
+        main_logger.info(f"  - query_generator_model: {configurable.query_generator_model}")
+        main_logger.info(f"  - answer_model: {configurable.answer_model}")
+        main_logger.info(f"  - reflection_model: {configurable.reflection_model}")
+        main_logger.info(f"  - index_search_model: {configurable.index_search_model}")
+        main_logger.info(f"  - use_web_search: {configurable.use_web_search}")
+        main_logger.info(f"  - number_of_initial_queries: {configurable.number_of_initial_queries}")
+        main_logger.info(f"  - max_research_loops: {configurable.max_research_loops}")
+        return configurable
+    except Exception as e:
+        main_logger.error(f"[{node_name}] Configuration error: {str(e)}")
+        if config:
+            main_logger.error(f"[{node_name}] Raw config: {config}")
+        raise
+
 def log_execution_time(func):
     """Decorator to log execution time of functions"""
     @wraps(func)
@@ -422,11 +441,11 @@ def search_kb_index(state: OverallState, config: RunnableConfig) -> Dict:
     )
     
     try:
-        configurable = Configuration.from_runnable_config(config)
+        configurable = debug_configuration(config, "search_kb_index")
         user_query = get_research_topic(state["messages"])
         
         kb_logger.info(f"KB search query: '{user_query}'")
-        kb_logger.info(f"Using model: {configurable.query_generator_model}")
+        kb_logger.info(f"Using model to search index: {configurable.index_search_model}")
         
         # Index analysis activity
         index_activity = create_activity(
@@ -663,12 +682,12 @@ def finalize_answer(state: OverallState, config: RunnableConfig) -> Dict:
     activities.append(synthesis_start)
     
     try:
-        configurable = Configuration.from_runnable_config(config)
+        configurable = debug_configuration(config, "finalize_answer")
         reasoning_model = configurable.answer_model
         current_date = get_current_date()
         research_results = state["web_research_result"]
         
-        main_logger.info(f"Using reasoning model: {reasoning_model}")
+        main_logger.info(f"Using modelto finalize answer: {reasoning_model}")
         main_logger.info(f"Finalizing answer based on {len(research_results)} research results")
         
         # Information synthesis activity
