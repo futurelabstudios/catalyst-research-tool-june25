@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { SquarePen, Send, StopCircle, Globe, Gauge } from "lucide-react";
+import { SquarePen, Send, StopCircle, Globe } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
@@ -29,13 +29,12 @@ export const InputForm: React.FC<InputFormProps> = ({
   hasHistory,
 }) => {
   const [internalInputValue, setInternalInputValue] = useState("");
-  const [mode, setMode] = useState("fast");
   const [useWebSearch, setUseWebSearch] = useState(false);
 
   const handleInternalSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!internalInputValue.trim()) return;
-    onSubmit(internalInputValue, mode, useWebSearch); // Pass mode
+    onSubmit(internalInputValue, "fast", useWebSearch); // Pass mode
     setInternalInputValue("");
   };
 
