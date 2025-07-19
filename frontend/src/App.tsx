@@ -5,6 +5,8 @@ import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { ChatMessagesView } from "@/components/ChatMessagesView";
 import { Activity } from "./lib/activity-types";
 
+const MAX_MESSAGE_LENGTH = 20000; // Approx. 20KB
+
 export default function App() {
   const [currentActivities, setCurrentActivities] = useState<Activity[]>([]);
   const [historicalActivities, setHistoricalActivities] = useState<
@@ -30,8 +32,21 @@ export default function App() {
       console.log(event);
     },
     onUpdateEvent: (event: any) => {
-      if (event.activity_feed && Array.isArray(event.activity_feed)) {
-        const newActivities = event.activity_feed.map((activity: any) => ({
+      console.log(event);
+      let activityFeed = null;
+      if (event.search_kb_index?.activity_feed) {
+        activityFeed = event.search_kb_index.activity_feed;
+      } else if (event.retrieve_kb_content?.activity_feed) {
+        activityFeed = event.retrieve_kb_content.activity_feed;
+      } else if (event.finalize_answer?.activity_feed) {
+        activityFeed = event.finalize_answer.activity_feed;
+        hasFinalizeEventOccurredRef.current = true;
+      } else if (event.activity_feed) {
+        activityFeed = event.activity_feed;
+      }
+
+      if (activityFeed && Array.isArray(activityFeed)) {
+        const newActivities = activityFeed.map((activity: any) => ({
           ...activity,
           timestamp: activity.timestamp
             ? new Date(activity.timestamp)
@@ -39,114 +54,22 @@ export default function App() {
         }));
 
         setCurrentActivities((prevActivities) => {
-          // Merge new activities with existing ones
           const activityMap = new Map(prevActivities.map((a) => [a.id, a]));
-
           newActivities.forEach((newActivity: Activity) => {
             if (activityMap.has(newActivity.id)) {
-              // Update existing activity
               activityMap.set(newActivity.id, {
                 ...activityMap.get(newActivity.id)!,
                 ...newActivity,
-                timestamp: activityMap.get(newActivity.id)!.timestamp, // Keep original timestamp
+                timestamp: activityMap.get(newActivity.id)!.timestamp,
               });
             } else {
-              // Add new activity
               activityMap.set(newActivity.id, newActivity);
             }
           });
-
           return Array.from(activityMap.values()).sort(
             (a, b) => a.timestamp.getTime() - b.timestamp.getTime()
           );
         });
-      }
-      // FALLBACK: Handle legacy event format while backend is being updated
-      else {
-        let legacyActivity: Activity | null = null;
-        const timestamp = new Date();
-
-        if (event.generate_query) {
-          legacyActivity = {
-            id: `generate_query_${timestamp.getTime()}`,
-            phase: "Planning",
-            title: "Generating Search Queries",
-            details: event.generate_query.query_list.join(", "),
-            status: "completed",
-            timestamp,
-            icon: "search",
-            importance: "normal",
-          };
-        } else if (event.research_step) {
-          const sources = event.research_step.sources_gathered || [];
-          const numSources = sources.length;
-          const wasWebSearchUsed = numSources > 0;
-
-          const researchType = wasWebSearchUsed ? "Web Search" : "Internal KB";
-          let details = wasWebSearchUsed
-            ? `Gathered ${numSources} sources.`
-            : "Searching internal knowledge base.";
-
-          if (wasWebSearchUsed) {
-            const uniqueLabels = [
-              ...new Set(sources.map((s: any) => s.label).filter(Boolean)),
-            ];
-            const exampleLabels = uniqueLabels.slice(0, 3).join(", ");
-            if (exampleLabels) {
-              details += ` Related to: ${exampleLabels}.`;
-            }
-          }
-
-          legacyActivity = {
-            id: `research_${timestamp.getTime()}`,
-            phase: "Research",
-            title: `${researchType} Research`,
-            details,
-            status: "completed",
-            timestamp,
-            progress: wasWebSearchUsed
-              ? { current: numSources, total: numSources }
-              : undefined,
-            icon: wasWebSearchUsed ? "globe" : "database",
-            importance: "critical",
-          };
-        } else if (event.reflection) {
-          legacyActivity = {
-            id: `reflection_${timestamp.getTime()}`,
-            phase: "Analysis",
-            title: "Reflection",
-            details: event.reflection.is_sufficient
-              ? "Research sufficient, generating final answer."
-              : `Need more information, generating follow-up queries: ${
-                  Array.isArray(event.reflection.follow_up_queries)
-                    ? event.reflection.follow_up_queries.join(", ")
-                    : "No follow-up queries provided."
-                }`,
-            status: "completed",
-            timestamp,
-            icon: "brain",
-            importance: "normal",
-          };
-        } else if (event.finalize_answer) {
-          legacyActivity = {
-            id: `finalize_${timestamp.getTime()}`,
-            phase: "Synthesis",
-            title: "Finalizing Answer",
-            details: "Composing and presenting the final answer.",
-            status: "completed",
-            timestamp,
-            icon: "check-circle",
-            importance: "critical",
-          };
-          hasFinalizeEventOccurredRef.current = true;
-        }
-
-        if (legacyActivity) {
-          setCurrentActivities((prevActivities) => [
-            ...prevActivities,
-            legacyActivity!,
-          ]);
-        }
       }
     },
   });
