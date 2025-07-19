@@ -5,8 +5,6 @@ import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { ChatMessagesView } from "@/components/ChatMessagesView";
 import { Activity } from "./lib/activity-types";
 
-const MAX_MESSAGE_LENGTH = 20000; // Approx. 20KB
-
 export default function App() {
   const [currentActivities, setCurrentActivities] = useState<Activity[]>([]);
   const [historicalActivities, setHistoricalActivities] = useState<
@@ -28,9 +26,11 @@ export default function App() {
       : "https://catalyst-research-tool-june25-production.up.railway.app",
     assistantId: "agent",
     messagesKey: "messages",
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     onFinish: (event: any) => {
       console.log(event);
     },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     onUpdateEvent: (event: any) => {
       console.log(event);
       let activityFeed = null;
@@ -46,6 +46,7 @@ export default function App() {
       }
 
       if (activityFeed && Array.isArray(activityFeed)) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const newActivities = activityFeed.map((activity: any) => ({
           ...activity,
           timestamp: activity.timestamp
