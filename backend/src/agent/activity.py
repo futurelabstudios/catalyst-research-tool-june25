@@ -18,11 +18,10 @@ class Activity(BaseModel):
     importance: Optional[Literal['critical', 'normal', 'optional']] = None
 
 def create_activity(id, phase, title, details, status, icon=None, progress=None):
-    return {
-        "id": id, "phase": phase, "title": title, "details": details,
-        "status": status, "timestamp": datetime.now(timezone.utc).isoformat(),
-        "icon": icon, "progress": progress
-    }
+    return Activity(
+        id=id, phase=phase, title=title, details=details,
+        status=status, icon=icon, progress=progress
+    )
 
 @dataclass
 class RetrievalProgress:

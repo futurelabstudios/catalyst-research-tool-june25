@@ -210,6 +210,12 @@ def route_initial_query(state: OverallState, config: RunnableConfig) -> Dict:
     """
     main_logger.info("Routing initial query to determine search path")
     
+    # Initial routing activity
+    routing_activity = create_activity(
+        "query_routing", "Planning", "Analyzing query type...", 
+        "Determining optimal research strategy", "in_progress", "brain"
+    )
+    
     try:
         configurable = Configuration.from_runnable_config(config)
         use_web_search = configurable.use_web_search
@@ -218,14 +224,32 @@ def route_initial_query(state: OverallState, config: RunnableConfig) -> Dict:
         
         if use_web_search:
             main_logger.info("Routing to web search path")
-            return {"next_node": "generate_web_queries"}
+            routing_complete = create_activity(
+                "query_routing", "Planning", "Web research path selected", 
+                "Query requires web search for current information", "completed", "done"
+            )
+            return {
+                "next_node": "generate_web_queries",
+                "activity_feed": [routing_activity, routing_complete]
+            }
         else:
             main_logger.info("Routing to internal KB path")
-            return {"next_node": "search_kb_index"}
+            routing_complete = create_activity(
+                "query_routing", "Planning", "Knowledge base path selected", 
+                "Query can be answered from internal knowledge base", "completed", "done"
+            )
+            return {
+                "next_node": "search_kb_index",
+                "activity_feed": [routing_activity, routing_complete]
+            }
     
     except Exception as e:
         main_logger.error(f"Error in route_initial_query: {str(e)}")
-        raise
+        error_activity = create_activity(
+            "query_routing", "Planning", "Query routing failed", 
+            f"Error: {str(e)}", "failed", "error"
+        )
+        return {"activity_feed": [routing_activity, error_activity]}
 
 # --- Web Search Path ---
 @log_state_changes
@@ -235,6 +259,12 @@ def generate_web_queries(state: OverallState, config: RunnableConfig) -> Dict:
     Node for the web search path. Generates initial search queries.
     """
     main_logger.info("Generating web search queries")
+    
+    # Activity start
+    activity_start = create_activity(
+        "query_generation", "Planning", "Analyzing your question...", 
+        "Breaking down the research topic into targeted search queries", "in_progress", "brain"
+    )
     
     try:
         configurable = Configuration.from_runnable_config(config)
@@ -260,11 +290,24 @@ def generate_web_queries(state: OverallState, config: RunnableConfig) -> Dict:
         
         main_logger.info(f"Generated {len(result.query)} search queries: {result.query}")
         
-        return {"search_query": result.query}
+        # Activity end
+        activity_end = create_activity(
+            "query_generation", "Planning", "Research strategy prepared", 
+            f"Generated {len(result.query)} focused search queries", "completed", "done"
+        )
+        
+        return {
+            "search_query": result.query,
+            "activity_feed": [activity_start, activity_end]
+        }
     
     except Exception as e:
         main_logger.error(f"Error in generate_web_queries: {str(e)}")
-        raise
+        error_activity = create_activity(
+            "query_generation", "Planning", "Query generation failed", 
+            f"Error: {str(e)}", "failed", "error"
+        )
+        return {"activity_feed": [activity_start, error_activity]}
 
 @log_state_changes
 @log_execution_time
@@ -278,10 +321,16 @@ def perform_web_search(state: OverallState, config: RunnableConfig) -> Dict:
     search_logger.info(f"Starting web search iteration {current_loop + 1}")
     search_logger.info(f"Performing web search for {len(queries)} queries: {queries}")
     
-    # Activity feed start
-    activity_start = create_activity(
-        "web_search", "Research", f"Performing web search (iteration {current_loop + 1})...", None, "in_progress", "search"
+    activities = []
+    
+    # Main batch activity
+    main_activity = create_activity(
+        "web_search_batch", "Research", f"Web research batch {current_loop + 1}", 
+        f"Executing {len(queries)} targeted searches", "in_progress", "search",
+        progress={"current": 0, "total": len(queries)}
     )
+    activities.append(main_activity)
+    
     try:
         gathered_contents = []
         gathered_sources = []
@@ -289,30 +338,74 @@ def perform_web_search(state: OverallState, config: RunnableConfig) -> Dict:
         for i, query in enumerate(queries):
             search_logger.info(f"Processing query {i+1}/{len(queries)}: '{query}'")
             
-            tool_output = google_search_tool.invoke({"query": query})
-            gathered_contents.append(tool_output["content"])
-            gathered_sources.extend(tool_output["sources"])
+            # Individual query activity
+            query_activity = create_activity(
+                f"search_query_{i}", "Research", f"Searching: {query[:50]}...", 
+                f"Query {i+1} of {len(queries)}", "in_progress", "search"
+            )
+            activities.append(query_activity)
             
-            search_logger.info(f"Query {i+1} completed. Content length: {len(tool_output['content'])}, Sources: {len(tool_output['sources'])}")
+            try:
+                tool_output = google_search_tool.invoke({"query": query})
+                gathered_contents.append(tool_output["content"])
+                gathered_sources.extend(tool_output["sources"])
+                
+                search_logger.info(f"Query {i+1} completed. Content length: {len(tool_output['content'])}, Sources: {len(tool_output['sources'])}")
+                
+                # Query completion
+                query_complete = create_activity(
+                    f"search_query_{i}", "Research", f"Search completed", 
+                    f"Found {len(tool_output['sources'])} sources", "completed", "check-circle"
+                )
+                activities.append(query_complete)
+                
+            except Exception as e:
+                search_logger.error(f"Error in query {i+1}: {str(e)}")
+                error_activity = create_activity(
+                    f"search_query_{i}", "Research", f"Search failed", 
+                    f"Error: {str(e)}", "failed", "error", retryable=True
+                )
+                activities.append(error_activity)
 
         search_logger.info(f"Web search completed. Total content items: {len(gathered_contents)}, Total sources: {len(gathered_sources)}")
         
-        # Activity feed end
-        activity_end = create_activity(
-            "web_search", "Research", f"Web search iteration {current_loop + 1} complete", 
-            f"Gathered {len(gathered_contents)} content items, {len(gathered_sources)} sources.", "completed", "done"
+        # Content processing activity
+        processing_activity = create_activity(
+            "content_processing", "Analysis", "Processing search results...", 
+            f"Analyzing content from {len(gathered_contents)} sources", "in_progress", "brain"
         )
+        activities.append(processing_activity)
+        
+        # Batch completion
+        batch_complete = create_activity(
+            "web_search_batch", "Research", f"Research batch {current_loop + 1} complete", 
+            f"Total: {len(gathered_contents)} results, {len(gathered_sources)} sources", 
+            "completed", "done"
+        )
+        activities.append(batch_complete)
+        
+        # Content processing complete
+        content_complete = create_activity(
+            "content_processing", "Analysis", "Content analysis complete", 
+            f"Processed {len(gathered_sources)} unique sources", "completed", "done"
+        )
+        activities.append(content_complete)
         
         return {
             "web_research_result": gathered_contents,
             "sources_gathered": gathered_sources,
             "research_loop_count": current_loop + 1,
-            "activity_feed": [activity_start, activity_end],
+            "activity_feed": activities,
         }
     
     except Exception as e:
         search_logger.error(f"Error in perform_web_search: {str(e)}")
-        raise
+        error_activity = create_activity(
+            "web_search_batch", "Research", f"Web search failed", 
+            f"Error: {str(e)}", "failed", "error"
+        )
+        activities.append(error_activity)
+        return {"activity_feed": activities}
 
 # --- Internal KB Path ---
 @log_state_changes
@@ -324,7 +417,8 @@ def search_kb_index(state: OverallState, config: RunnableConfig) -> Dict:
     kb_logger.info("Searching KB index for relevant files")
 
     activity_start = create_activity(
-        "search_index", "Research", "Searching knowledge base index...", None, "in_progress", "search"
+        "search_index", "Research", "Searching knowledge base index...", 
+        "Analyzing internal knowledge base for relevant documents", "in_progress", "search"
     )
     
     try:
@@ -333,6 +427,12 @@ def search_kb_index(state: OverallState, config: RunnableConfig) -> Dict:
         
         kb_logger.info(f"KB search query: '{user_query}'")
         kb_logger.info(f"Using model: {configurable.query_generator_model}")
+        
+        # Index analysis activity
+        index_activity = create_activity(
+            "index_analysis", "Analysis", "Analyzing knowledge base structure...", 
+            "Processing document index for relevance matching", "in_progress", "brain"
+        )
         
         llm = ChatGoogleGenerativeAI(
             model=configurable.index_search_model, temperature=0.0, max_retries=2, api_key=gemini_api_key
@@ -356,21 +456,39 @@ def search_kb_index(state: OverallState, config: RunnableConfig) -> Dict:
         if not result.file_paths:
             kb_logger.warning("No relevant files found in KB index")
             activity_end = create_activity(
-                "search_index", "Research", "No relevant documents found", None, "error", "error"
+                "search_index", "Research", "No relevant documents found", 
+                "Knowledge base search completed with no matches", "completed", "alert-circle"
             )
-            return {"messages": ..., "activity_feed": [activity_start, activity_end]}
-
+            return {
+                "messages": [AIMessage(content="I couldn't find any relevant documents in the knowledge base for your query.")], 
+                "activity_feed": [activity_start, index_activity, activity_end]
+            }
 
         kb_logger.info(f"Found {len(result.file_paths)} relevant files: {result.file_paths}")
-        activity_end = create_activity(
-            "search_index", "Research", "Searched knowledge base index", 
-            f"Found {len(result.file_paths)} potentially relevant files.", "completed", "done"
+        
+        # Index analysis complete
+        index_complete = create_activity(
+            "index_analysis", "Analysis", "Document matching complete", 
+            f"Identified {len(result.file_paths)} relevant documents", "completed", "done"
         )
-        return {"relevant_file_paths": result.file_paths, "activity_feed": [activity_start, activity_end]}
+        
+        activity_end = create_activity(
+            "search_index", "Research", "Knowledge base search complete", 
+            f"Found {len(result.file_paths)} potentially relevant files", "completed", "done"
+        )
+        
+        return {
+            "relevant_file_paths": result.file_paths, 
+            "activity_feed": [activity_start, index_activity, index_complete, activity_end]
+        }
     
     except Exception as e:
         kb_logger.error(f"Error in search_kb_index: {str(e)}")
-        raise
+        error_activity = create_activity(
+            "search_index", "Research", "Knowledge base search failed", 
+            f"Error: {str(e)}", "failed", "error"
+        )
+        return {"activity_feed": [activity_start, error_activity]}
 
 
 @log_state_changes
@@ -436,6 +554,12 @@ def reflection(state: OverallState, config: RunnableConfig) -> Dict:
     """
     main_logger.info("Starting reflection on gathered research")
     
+    # Reflection start activity
+    reflection_start = create_activity(
+        "reflection", "Analysis", "Evaluating research quality...", 
+        "Assessing information completeness and identifying gaps", "in_progress", "brain"
+    )
+    
     try:
         configurable = Configuration.from_runnable_config(config)
         research_results = state["web_research_result"]
@@ -460,14 +584,31 @@ def reflection(state: OverallState, config: RunnableConfig) -> Dict:
         if result.follow_up_queries:
             main_logger.info(f"Generated {len(result.follow_up_queries)} follow-up queries: {result.follow_up_queries}")
         
+        # Reflection completion activity
+        if result.is_sufficient:
+            reflection_end = create_activity(
+                "reflection", "Analysis", "Research evaluation complete", 
+                "Information appears sufficient for comprehensive answer", "completed", "check-circle"
+            )
+        else:
+            reflection_end = create_activity(
+                "reflection", "Analysis", "Additional research needed", 
+                f"Identified {len(result.follow_up_queries)} areas for deeper investigation", "completed", "search"
+            )
+        
         return {
             "is_sufficient": result.is_sufficient,
             "search_query": result.follow_up_queries,
+            "activity_feed": [reflection_start, reflection_end]
         }
     
     except Exception as e:
         main_logger.error(f"Error in reflection: {str(e)}")
-        raise
+        error_activity = create_activity(
+            "reflection", "Analysis", "Research evaluation failed", 
+            f"Error: {str(e)}", "failed", "error"
+        )
+        return {"activity_feed": [reflection_start, error_activity]}
 
 @log_execution_time
 def evaluate_research(state: OverallState, config: RunnableConfig) -> str:
@@ -512,10 +653,15 @@ def finalize_answer(state: OverallState, config: RunnableConfig) -> Dict:
     """
     main_logger.info("Finalizing answer based on gathered research")
     
-    # Activity feed start
-    activity_start = create_activity(
-        "synthesize", "Synthesis", "Composing final answer...", None, "in_progress", "synthesize"
+    activities = []
+    
+    # Synthesis start activity
+    synthesis_start = create_activity(
+        "synthesize", "Synthesis", "Composing final answer...", 
+        "Combining insights from multiple sources", "in_progress", "brain"
     )
+    activities.append(synthesis_start)
+    
     try:
         configurable = Configuration.from_runnable_config(config)
         reasoning_model = configurable.answer_model
@@ -524,6 +670,13 @@ def finalize_answer(state: OverallState, config: RunnableConfig) -> Dict:
         
         main_logger.info(f"Using reasoning model: {reasoning_model}")
         main_logger.info(f"Finalizing answer based on {len(research_results)} research results")
+        
+        # Information synthesis activity
+        info_synthesis = create_activity(
+            "information_synthesis", "Synthesis", "Synthesizing information...", 
+            f"Combining insights from {len(research_results)} sources", "in_progress", "brain"
+        )
+        activities.append(info_synthesis)
         
         formatted_prompt = answer_instructions.format(
             current_date=current_date,
@@ -540,8 +693,22 @@ def finalize_answer(state: OverallState, config: RunnableConfig) -> Dict:
         
         main_logger.info(f"Generated answer length: {len(result.content)} characters")
         
+        # Information synthesis complete
+        info_complete = create_activity(
+            "information_synthesis", "Synthesis", "Information synthesis complete", 
+            f"Successfully combined insights from all sources", "completed", "done"
+        )
+        activities.append(info_complete)
+        
         unique_sources = []
         if configurable.use_web_search and state.get("sources_gathered"):
+            # Citation processing activity
+            citation_activity = create_activity(
+                "citation_processing", "Synthesis", "Processing citations...", 
+                f"Linking {len(state['sources_gathered'])} sources", "in_progress", "web"
+            )
+            activities.append(citation_activity)
+            
             original_sources = len(state["sources_gathered"])
             main_logger.info(f"Processing {original_sources} sources for citation replacement")
             
@@ -551,18 +718,54 @@ def finalize_answer(state: OverallState, config: RunnableConfig) -> Dict:
                     unique_sources.append(source)
             
             main_logger.info(f"Processed citations: {len(unique_sources)} unique sources used")
+            
+            # Citation processing complete
+            citation_complete = create_activity(
+                "citation_processing", "Synthesis", "Citations processed", 
+                f"Successfully linked {len(unique_sources)} unique sources", "completed", "done"
+            )
+            activities.append(citation_complete)
+        
+        # Quality validation activity
+        validation_activity = create_activity(
+            "quality_check", "Validation", "Validating answer quality...", 
+            "Ensuring completeness and accuracy", "in_progress", "check-circle"
+        )
+        activities.append(validation_activity)
+        
+        # Quality validation complete
+        validation_complete = create_activity(
+            "quality_check", "Validation", "Quality validation complete", 
+            "Answer meets quality standards", "completed", "check-circle"
+        )
+        activities.append(validation_complete)
         
         main_logger.info("Answer finalization completed successfully")
-        # Activity feed end
-        activity_end = create_activity(
-            "synthesize", "Synthesis", "Answer composed", f"Answer length: {len(result.content)} characters.", "completed", "done"
+        
+        # Final synthesis activity
+        synthesis_end = create_activity(
+            "synthesize", "Synthesis", "Answer composed", 
+            f"Final answer prepared ({len(result.content)} characters)", "completed", "done"
         )
-        activity_feed = state.get("activity_feed", []) + [activity_start, activity_end]
-        return {"messages": [AIMessage(content=result.content)], "sources_gathered": unique_sources, "activity_feed": [activity_start, activity_end]}
+        activities.append(synthesis_end)
+        
+        # Combine with existing activities from state
+        all_activities = state.get("activity_feed", []) + activities
+        
+        return {
+            "messages": [AIMessage(content=result.content)], 
+            "sources_gathered": unique_sources, 
+            "activity_feed": all_activities
+        }
     
     except Exception as e:
         main_logger.error(f"Error in finalize_answer: {str(e)}")
-        raise
+        error_activity = create_activity(
+            "synthesize", "Synthesis", "Answer composition failed", 
+            f"Error: {str(e)}", "failed", "error"
+        )
+        activities.append(error_activity)
+        return {"activity_feed": activities}
 
 # =========================================================================
 # GRAPH CONSTRUCTION

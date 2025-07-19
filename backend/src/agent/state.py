@@ -24,7 +24,7 @@ class OverallState(TypedDict):
     reasoning_model: str
     use_web_search: bool
     relevant_file_paths: Optional[List[str]]
-    activity_feed: Annotated[Activity, operator.add]
+    activity_feed: Annotated[List[Activity], operator.add]
 
 
 class ReflectionState(TypedDict):
